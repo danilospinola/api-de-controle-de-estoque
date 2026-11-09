@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Controle de Estoque: Amazon RDS for PostgreSQL de desenvolvimento para o case (Single-AZ, db.t4g.micro),
+  o menor custo permitido pelo plano Free. Acesso a partir da máquina do desenvolvedor por endpoint público
+  restrito a um único IP (/32), com TLS obrigatório e senha mestre gerenciada no AWS Secrets Manager.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: app Spring Boot (perfil rds, máquina do dev) -> TLS verify-full -> RDS PG público restrito a /32; schema criado pelo Flyway da app
+    must:
+      - plano Free -> só Single-AZ e classes db.t3/t4g.micro
+      - porta 5432 nunca aberta p/ 0.0.0.0/0; só o /32 do dev
+    ref:
+      - at: README.md
+        has: decisões de infra, trade-offs dev x produção, deploy e teardown
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Rede
+        Parameters: [VpcId, SubnetIds, AllowedCidr]
+      - Label:
+          default: Banco de dados
+        Parameters: [EngineVersion, DBInstanceClass, DBName, MasterUsername, DeletionProtection]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC onde o banco e o security group são criados (a VPC padrão da conta).
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets públicas dessa VPC, em pelo menos 2 AZs, para o DB subnet group.
+  AllowedCidr:
+    Type: String
+    Description: IP público da máquina do desenvolvedor no formato x.x.x.x/32 (atualize a stack se ele mudar).
+    AllowedPattern: '^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)/32$'
+    ConstraintDescription: informe um único endereço IPv4 com máscara /32.
+  EngineVersion:
+    Type: String
+    Default: "18.6"
+    Description: Versão do RDS for PostgreSQL (a mais recente disponível na região quando a stack foi criada).
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues: [db.t4g.micro, db.t3.micro]
+    Description: Classes elegíveis ao plano Free.
+  DBName:
+    Type: String
+    Default: estoque
+    AllowedPattern: '^[a-z][a-z0-9_]{0,62}$'
+    Description: Banco criado na instância (DB_NAME da aplicação).
+  MasterUsername:
+    Type: String
+    Default: estoque_admin
+    AllowedPattern: '^[a-z][a-z0-9_]{2,15}$'
+    Description: Usuário mestre. A senha é gerada e guardada pelo RDS no Secrets Manager.
+  DeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Mude para false (update da stack) antes de excluir a stack.
+
+Rules:
+  UsuarioMestreNaoPadrao:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Contains:
+                - [postgres, admin, root, master, rdsadmin]
+                - !Ref MasterUsername
+        AssertDescription: o usuário mestre não pode ser um nome padrão (postgres, admin, root, master, rdsadmin).
+
+Resources:
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: único ponto de entrada de rede do banco; ingress 5432 só do IP do dev; egress fechado (RDS não inicia conexões neste uso)
+        must:
+          - ingress nunca 0.0.0.0/0
+          - liberar egress antes de usar extensões aws_s3/aws_lambda
+        mutable: change-with-constraints
+    Properties:
+      GroupDescription: PostgreSQL do Controle de Estoque - entrada somente do IP do desenvolvedor
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref AllowedCidr
+          Description: PostgreSQL a partir do IP do desenvolvedor
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+          Description: Substitui o egress padrao liberado - nenhuma saida necessaria
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-postgres"
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets do RDS do Controle de Estoque
+      SubnetIds: !Ref SubnetIds
+      Tags:
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+
+  DatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: deixa explícito o TLS obrigatório em vez de depender do default da família
+        must:
+          - Family = postgres<major da EngineVersion> (derivada abaixo)
+          - rds.force_ssl=1 enquanto o endpoint for público
+    Properties:
+      Family: !Join ["", ["postgres", !Select [0, !Split [".", !Ref EngineVersion]]]]
+      Description: PostgreSQL do Controle de Estoque com TLS obrigatorio
+      Parameters:
+        rds.force_ssl: "1"
+      Tags:
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+
+  DatabaseInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          persistência do case, dados descartáveis; Single-AZ db.t4g.micro = Graviton, o mais barato elegível (Multi-AZ é bloqueado no plano Free);
+          gp3 20 GB = mínimo do gp3; KMS aws/rds (CMK custa +US$1/mês, fica p/ produção); Database Insights Standard 7d (grátis);
+          sem backup por decisão do dono (ambiente temporário; o plano Free rejeitou retenção de 7 dias) -> Delete em vez de Snapshot/Retain,
+          teardown não deixa instância nem snapshot cobrando; logs no CloudWatch ficam p/ produção (exigiriam CMK nos log groups)
+        must:
+          - PubliclyAccessible=true só com SG restrito a /32 + rds.force_ssl=1
+          - nunca senha em texto -> ManageMasterUserPassword=true
+          - DeletionProtection=false (update) antes de excluir a stack
+          - BackupRetentionPeriod=0 + Delete -> excluir ou substituir a instância perde os dados sem cópia
+          - BackupRetentionPeriod 0 -> >0 causa indisponibilidade; plano Free rejeitou retenção de 7 dias
+        mutable: review-required
+        mutability:
+          AllocatedStorage: change-with-constraints
+          DBInstanceClass: change-with-constraints
+          BackupRetentionPeriod: change-with-constraints
+          DeletionProtection: free-to-tune
+    Properties:
+      DBInstanceIdentifier: !Sub "${AWS::StackName}-postgres"
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: false
+      PubliclyAccessible: true
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      DBParameterGroupName: !Ref DatabaseParameterGroup
+      DBName: !Ref DBName
+      MasterUsername: !Ref MasterUsername
+      ManageMasterUserPassword: true
+      BackupRetentionPeriod: 0
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: !Ref DeletionProtection
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-postgres"
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+        - Key: created_by
+          Value: rds-oss-skill
+        - Key: generation_model
+          Value: claude-opus-5-5
+
+Outputs:
+  DatabaseEndpoint:
+    Description: Endpoint do banco (DB_HOST)
+    Value: !GetAtt DatabaseInstance.Endpoint.Address
+  DatabasePort:
+    Description: Porta do banco (DB_PORT)
+    Value: !GetAtt DatabaseInstance.Endpoint.Port
+  DatabaseName:
+    Description: Nome do banco (DB_NAME)
+    Value: !Ref DBName
+  MasterUserSecretArn:
+    Description: ARN do segredo com usuário e senha mestre no Secrets Manager
+    Value: !GetAtt DatabaseInstance.MasterUserSecret.SecretArn
+  SecurityGroupId:
+    Description: Security group do banco
+    Value: !GetAtt DatabaseSecurityGroup.GroupId

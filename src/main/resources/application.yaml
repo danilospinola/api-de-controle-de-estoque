@@ -1,0 +1,60 @@
+spring:
+  application:
+    name: Controle de Estoque
+
+  # Perfil padrão (local): H2 em memória no modo de compatibilidade PostgreSQL.
+  # Permite executar a aplicação sem nenhuma infraestrutura externa.
+  datasource:
+    url: jdbc:h2:mem:estoque;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    username: sa
+    password:
+
+  jpa:
+    # O schema é responsabilidade do Flyway; o Hibernate apenas valida o mapeamento.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  error:
+    include-stacktrace: never
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    # A raiz "/" redireciona para o Swagger UI: o link entregue aos avaliadores pode ser só o domínio.
+    use-root-path: true
+
+estoque:
+  concorrencia:
+    # Quantidade máxima de tentativas quando ocorre conflito de versão (lock otimista).
+    max-tentativas: 5
+    # Espera base (ms) entre tentativas; cresce linearmente a cada nova tentativa.
+    espera-base-ms: 20
+
+---
+# Perfil "rds": Amazon RDS for PostgreSQL.
+# Credenciais e endpoint vêm de variáveis de ambiente — nunca versionadas.
+# TLS obrigatório com validação do certificado (sslmode=verify-full) usando o bundle de CA da AWS:
+#   https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+spring:
+  config:
+    activate:
+      on-profile: rds
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/${DB_NAME:estoque}?sslmode=verify-full&sslrootcert=${DB_SSL_ROOT_CERT:./certs/global-bundle.pem}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: 2
+      connection-timeout: 5000
+      max-lifetime: 1500000

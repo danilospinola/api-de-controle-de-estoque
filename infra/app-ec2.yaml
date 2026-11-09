@@ -1,0 +1,405 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Controle de Estoque: API Spring Boot publicada para os avaliadores do case em uma EC2 t4g.micro (a menor
+  instância aceita pelo plano Free) atrás do CloudFront, que dá um link HTTPS gratuito. A EC2 só aceita tráfego
+  do CloudFront e lê a senha do RDS no Secrets Manager pelo papel IAM, sem credenciais compartilhadas.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: avaliador -HTTPS-> CloudFront -HTTP:80-> EC2 (app, perfil rds) -TLS-> RDS da stack controle-estoque-dev
+    must:
+      - porta 80 da EC2 só do prefix list de origem do CloudFront; nunca 0.0.0.0/0
+      - plano Free -> só instâncias elegíveis (t4g.micro é a menor)
+      - remover esta stack antes da stack do banco (ela adiciona uma regra no SG do banco)
+    ref:
+      - at: README.md
+        has: decisões, limitações, deploy, atualização do jar e teardown
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Rede
+        Parameters: [VpcId, SubnetId, CloudFrontPrefixListId]
+      - Label:
+          default: Banco (outputs da stack controle-estoque-dev)
+        Parameters: [DatabaseSecurityGroupId, DatabaseEndpoint, DatabaseName, DatabaseSecretArn]
+      - Label:
+          default: Aplicação
+        Parameters: [InstanceType, LatestAmiId, ArtifactKey]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC do banco (a VPC padrão da conta).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet pública dessa VPC (com IP público automático), para a EC2.
+  CloudFrontPrefixListId:
+    Type: String
+    AllowedPattern: '^pl-[0-9a-f]+$'
+    Description: ID do prefix list gerenciado com.amazonaws.global.cloudfront.origin-facing na região.
+  DatabaseSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group do RDS (output SecurityGroupId da stack do banco).
+  DatabaseEndpoint:
+    Type: String
+    Description: Endpoint do RDS (output DatabaseEndpoint da stack do banco).
+  DatabaseName:
+    Type: String
+    Default: estoque
+    Description: Nome do banco (output DatabaseName da stack do banco).
+  DatabaseSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$'
+    Description: ARN do segredo do usuário mestre (output MasterUserSecretArn da stack do banco).
+  InstanceType:
+    Type: String
+    Default: t4g.micro
+    AllowedValues: [t4g.micro, t4g.small]
+    Description: Instâncias ARM elegíveis ao plano Free (a AMI abaixo é arm64).
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Amazon Linux 2023 arm64 mais recente (parâmetro público do SSM).
+  ArtifactKey:
+    Type: String
+    Default: app/controle-de-estoque.jar
+    Description: Chave do jar da aplicação no bucket de artefatos.
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: guarda o jar que a EC2 baixa a cada início do serviço; privado e criptografado; sem versionamento e com Delete porque o artefato é reconstruído do código e o ambiente é temporário
+        must:
+          - esvaziar o bucket antes de excluir a stack
+          - nunca liberar acesso público
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SomenteTLS
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  AppRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: identidade da EC2; lê só o jar e o segredo do banco; SSM Session Manager substitui SSH (sem chave nem porta 22)
+        must:
+          - menor privilégio: só s3:GetObject no jar e secretsmanager:GetSecretValue no segredo do banco
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: acesso-minimo-da-aplicacao
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: LerJar
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${ArtifactBucket.Arn}/${ArtifactKey}"
+              - Sid: LerSenhaDoBanco
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecretArn
+      Tags:
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppRole
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: a EC2 só recebe HTTP do CloudFront (prefix list gerenciado); saída só HTTPS (pacotes, S3, Secrets Manager, SSM, CA do RDS) e 5432 para o banco
+        must:
+          - ingress só do prefix list do CloudFront; nunca 0.0.0.0/0
+          - o prefix list do CloudFront conta ~55 regras na cota do SG
+        mutable: change-with-constraints
+    Properties:
+      GroupDescription: API do Controle de Estoque - HTTP somente a partir do CloudFront
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: HTTP a partir das origens do CloudFront
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS para pacotes, S3, Secrets Manager, SSM e CA do RDS
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref DatabaseSecurityGroupId
+          Description: PostgreSQL no RDS
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-api"
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+
+  DatabaseIngressFromApp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: libera o banco só para o SG da API; fica nesta stack para a stack do banco não mudar e sair junto no teardown
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+      Description: PostgreSQL a partir da API publicada (EC2)
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          roda o jar como serviço systemd (usuário sem privilégios, porta 80 via CAP_NET_BIND_SERVICE); a cada início
+          baixa o jar do S3 e lê a senha do Secrets Manager; health check a cada 5 min reinicia se o banco recusar
+          a conexão (rotação semanal da senha); swap de 1 GiB porque a t4g.micro tem 1 GiB de RAM
+        must:
+          - IMDSv2 obrigatório
+          - UserData só roda no primeiro boot; mudanças nele exigem recriar a instância
+        mutable: review-required
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      IamInstanceProfile: !Ref AppInstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-api"
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Prepara a EC2 para rodar a API como servico systemd (executado so no primeiro boot).
+          set -euxo pipefail
+
+          dd if=/dev/zero of=/swapfile bs=1M count=1024
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+          dnf install -y java-21-amazon-corretto-headless
+          useradd --system --home-dir /opt/estoque --shell /sbin/nologin estoque
+          mkdir -p /opt/estoque/certs
+          curl -fsS -o /opt/estoque/certs/global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
+          cat > /opt/estoque/ambiente <<'FIM'
+          DB_HOST=${DatabaseEndpoint}
+          DB_PORT=5432
+          DB_NAME=${DatabaseName}
+          DB_SSL_ROOT_CERT=/opt/estoque/certs/global-bundle.pem
+          DB_SECRET_ARN=${DatabaseSecretArn}
+          ARTEFATO=s3://${ArtifactBucket}/${ArtifactKey}
+          AWS_REGION=${AWS::Region}
+          FIM
+
+          cat > /opt/estoque/iniciar.sh <<'FIM'
+          #!/bin/bash
+          # A cada inicio: baixa o jar atual e le a senha do banco. Novo deploy ou senha rotacionada = restart.
+          set -euo pipefail
+          aws s3 cp "$ARTEFATO" /opt/estoque/app.jar --only-show-errors
+          SEGREDO=$(aws secretsmanager get-secret-value --secret-id "$DB_SECRET_ARN" --query SecretString --output text)
+          DB_USERNAME=$(printf '%s' "$SEGREDO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["username"])')
+          DB_PASSWORD=$(printf '%s' "$SEGREDO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["password"])')
+          export DB_USERNAME DB_PASSWORD
+          unset SEGREDO
+          exec java -Xmx400m -XX:+UseSerialGC -jar /opt/estoque/app.jar --spring.profiles.active=rds --server.port=80 --server.forward-headers-strategy=framework
+          FIM
+
+          cat > /usr/local/bin/estoque-health.sh <<'FIM'
+          #!/bin/bash
+          # Reinicia a API se ela nao consegue consultar o banco (ex.: senha rotacionada pelo RDS).
+          # Um UUID inexistente responde 404 quando o banco responde; qualquer outra coisa reinicia.
+          codigo=$(curl -s -o /dev/null -m 10 -w '%{http_code}' http://localhost/api/produtos/00000000-0000-0000-0000-000000000000 || true)
+          if [ "$codigo" != "404" ] && systemctl is-active --quiet estoque; then
+            logger -t estoque-health "API respondeu $codigo; reiniciando"
+            systemctl restart estoque
+          fi
+          FIM
+
+          cat > /etc/systemd/system/estoque.service <<'FIM'
+          [Unit]
+          Description=API Controle de Estoque (perfil rds)
+          After=network-online.target
+          Wants=network-online.target
+          StartLimitIntervalSec=0
+
+          [Service]
+          User=estoque
+          WorkingDirectory=/opt/estoque
+          EnvironmentFile=/opt/estoque/ambiente
+          ExecStart=/opt/estoque/iniciar.sh
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+          Restart=always
+          RestartSec=15
+          SuccessExitStatus=143
+
+          [Install]
+          WantedBy=multi-user.target
+          FIM
+
+          cat > /etc/systemd/system/estoque-health.service <<'FIM'
+          [Unit]
+          Description=Health check da API Controle de Estoque
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/estoque-health.sh
+          FIM
+
+          cat > /etc/systemd/system/estoque-health.timer <<'FIM'
+          [Unit]
+          Description=Health check da API a cada 5 minutos
+
+          [Timer]
+          OnBootSec=10min
+          OnUnitActiveSec=5min
+
+          [Install]
+          WantedBy=timers.target
+          FIM
+
+          chmod 755 /opt/estoque/iniciar.sh /usr/local/bin/estoque-health.sh
+          chmod 640 /opt/estoque/ambiente
+          chown -R estoque:estoque /opt/estoque
+          systemctl daemon-reload
+          systemctl enable --now estoque.service estoque-health.timer
+
+  AppDistribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          link HTTPS gratuito (*.cloudfront.net) para os avaliadores; sem cache (API dinâmica); permite fechar a EC2 para a internet.
+          AllViewer repassa o Host do CloudFront e X-Forwarded-Proto=https faz a app (forward-headers-strategy=framework) gerar
+          redirecionamentos https://<distribuição>, não o DNS interno da EC2. VPC origin (EC2 privada) seria mais seguro, mas exigiria
+          NAT/VPC endpoints com custo maior que a própria app; fica p/ produção
+        must:
+          - CachingDisabled: respostas da API nunca podem vir de cache
+          - manter AllViewer + X-Forwarded-Proto, senão o Swagger redireciona para o DNS da EC2 (bloqueado pelo SG)
+          - origem segue o DNS público da EC2; parar/iniciar a instância troca o DNS e exige atualizar a stack
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Controle de Estoque - API para os avaliadores do case
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: api-ec2
+            DomainName: !GetAtt AppInstance.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+            OriginCustomHeaders:
+              - HeaderName: X-Forwarded-Proto
+                HeaderValue: https
+        DefaultCacheBehavior:
+          TargetOriginId: api-ec2
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          CachedMethods: [GET, HEAD]
+          # Políticas gerenciadas: Managed-CachingDisabled e Managed-AllViewer.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          Compress: true
+      Tags:
+        - Key: Projeto
+          Value: controle-de-estoque
+        - Key: Ambiente
+          Value: dev
+
+Outputs:
+  SwaggerUrl:
+    Description: Link para os avaliadores (Swagger UI)
+    Value: !Sub "https://${AppDistribution.DomainName}/swagger-ui.html"
+  ApiBaseUrl:
+    Description: Base da API
+    Value: !Sub "https://${AppDistribution.DomainName}/api"
+  ArtifactS3Uri:
+    Description: Onde publicar o jar (depois reinicie o serviço estoque na EC2)
+    Value: !Sub "s3://${ArtifactBucket}/${ArtifactKey}"
+  ArtifactBucketName:
+    Description: Bucket de artefatos (esvazie antes de excluir a stack)
+    Value: !Ref ArtifactBucket
+  InstanceId:
+    Description: EC2 da API (acesso por SSM Session Manager)
+    Value: !Ref AppInstance
