@@ -7,9 +7,6 @@ import com.example.controledeestoque.controller.dto.Requests.MovimentacaoRequest
 import com.example.controledeestoque.controller.dto.Responses.BloqueioResponse;
 import com.example.controledeestoque.controller.dto.Responses.ProdutoResponse;
 import com.example.controledeestoque.controller.dto.Responses.ReservaResponse;
-import com.example.controledeestoque.domain.Bloqueio;
-import com.example.controledeestoque.domain.Produto;
-import com.example.controledeestoque.domain.Reserva;
 import com.example.controledeestoque.domain.StatusBloqueio;
 import com.example.controledeestoque.domain.StatusReserva;
 import com.example.controledeestoque.service.EstoqueService;
@@ -17,7 +14,6 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -26,10 +22,16 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Saldo de estoque do produto e as operações que o alteram.
+ * <p>
+ * Todo sucesso responde 200 com o recurso no corpo, inclusive os cadastros (produto, reserva e
+ * bloqueio): decisão do projeto, em vez de 201 Created. O identificador do recurso criado volta
+ * no campo {@code id} do corpo. Os erros mantêm os códigos 4xx/5xx (ver {@link GlobalExceptionHandler}).
+ */
 @Tag(name = "Produtos", description = "Saldo de estoque, entradas, saídas, reservas e bloqueios")
 @RestController
 @RequestMapping("/api/produtos")
@@ -40,10 +42,8 @@ public class ProdutoController {
 
     @Operation(summary = "Cadastra um produto com nome e saldo inicial disponível")
     @PostMapping
-    public ResponseEntity<ProdutoResponse> criar(@Valid @RequestBody CriarProdutoRequest request) {
-        Produto produto = estoqueService.criarProduto(request.nome(), request.quantidadeInicialOuZero());
-        return ResponseEntity.created(URI.create("/api/produtos/" + produto.getId()))
-                .body(ProdutoResponse.de(produto));
+    public ProdutoResponse criar(@Valid @RequestBody CriarProdutoRequest request) {
+        return ProdutoResponse.de(estoqueService.criarProduto(request.nome(), request.quantidadeInicialOuZero()));
     }
 
     @Operation(summary = "Consulta a situação atual do estoque do produto")
@@ -66,11 +66,8 @@ public class ProdutoController {
 
     @Operation(summary = "Reserva unidades disponíveis para um pedido")
     @PostMapping("/{produtoId}/reservas")
-    public ResponseEntity<ReservaResponse> reservar(@PathVariable UUID produtoId,
-                                                    @Valid @RequestBody CriarReservaRequest request) {
-        Reserva reserva = estoqueService.reservar(produtoId, request.pedidoId(), request.quantidade());
-        return ResponseEntity.created(URI.create("/api/reservas/" + reserva.getId()))
-                .body(ReservaResponse.de(reserva));
+    public ReservaResponse reservar(@PathVariable UUID produtoId, @Valid @RequestBody CriarReservaRequest request) {
+        return ReservaResponse.de(estoqueService.reservar(produtoId, request.pedidoId(), request.quantidade()));
     }
 
     @Operation(summary = "Lista as reservas do produto (filtro opcional por status)")
@@ -82,12 +79,9 @@ public class ProdutoController {
 
     @Operation(summary = "Bloqueia unidades disponíveis, tornando-as indisponíveis para uso")
     @PostMapping("/{produtoId}/bloqueios")
-    public ResponseEntity<BloqueioResponse> bloquear(@PathVariable UUID produtoId,
-                                                     @Valid @RequestBody CriarBloqueioRequest request) {
-        Bloqueio bloqueio = estoqueService.bloquear(
-                produtoId, request.pedidoId(), request.motivo(), request.quantidade());
-        return ResponseEntity.created(URI.create("/api/bloqueios/" + bloqueio.getId()))
-                .body(BloqueioResponse.de(bloqueio));
+    public BloqueioResponse bloquear(@PathVariable UUID produtoId, @Valid @RequestBody CriarBloqueioRequest request) {
+        return BloqueioResponse.de(
+                estoqueService.bloquear(produtoId, request.pedidoId(), request.motivo(), request.quantidade()));
     }
 
     @Operation(summary = "Lista os bloqueios do produto (filtro opcional por status)")

@@ -93,7 +93,7 @@ HTTP → ProdutoController (valida DTO)
            → Reserva.criar(produto, ...)  ← regra: quantidade ≤ disponível
            → flush: UPDATE produto ... WHERE id=? AND version=?   + INSERT reserva
         ← conflito de versão? nova transação, relê o saldo, reavalia a regra
-     ← 201 Created + Location
+     ← 200 OK + reserva criada no corpo (com o id)
 ```
 
 ---
@@ -109,7 +109,8 @@ HTTP → ProdutoController (valida DTO)
 | **CHECK constraints no banco** (invariante e não-negatividade) | Defesa em profundidade: mesmo um bug, script manual ou outro serviço não consegue gravar estado inconsistente. Há teste provando isso. | Confiar só na aplicação. |
 | **Flyway + `ddl-auto=validate`** | Schema versionado, revisável e reproduzível; Hibernate só valida o mapeamento. | `ddl-auto=update`: inadequado para produção. |
 | **H2 (modo PostgreSQL) no perfil local/testes; PostgreSQL no perfil `rds`** | Executa e testa sem infraestrutura. A mesma migration roda nos dois bancos. | Testcontainers com PostgreSQL real (ver Limitações; não havia Docker no ambiente de desenvolvimento). |
-| **Erros RFC 9457 com status semânticos** | 400 payload inválido · 404 inexistente · 422 regra de negócio (estoque insuficiente, transição inválida) · 409 conflito de concorrência não resolvido. O cliente diferencia "corrija o pedido" de "tente de novo". | 400 genérico para tudo. |
+| **Erros RFC 9457 em português, com status semânticos** | 400 payload ou formato inválido (indicando o campo, o tipo ou os valores aceitos) · 404 inexistente · 405 método não permitido · 422 regra de negócio (estoque insuficiente, transição inválida) · 409 conflito de concorrência não resolvido · 500 erro inesperado (mensagem genérica com um identificador que também vai para o log, sem detalhes internos). As mensagens de validação são explícitas em português, então não dependem do idioma do servidor. O cliente diferencia "corrija o pedido" de "tente de novo". | 400 genérico para tudo; responder 200 também nos erros (descartado: clientes, monitoramento e health check passariam a tratar erro como sucesso). |
+| **Sucesso sempre 200, inclusive nos cadastros** | Decisão do projeto: toda resposta de sucesso usa o mesmo código e traz o recurso no corpo; o `id` do recurso criado vem no corpo. A mudança fica só na camada web (domínio, banco e infraestrutura não são afetados). | `201 Created` + `Location`, a convenção REST para criação. Ela distingue "criei agora" de "já existia", o que pesará quando houver idempotência e SKU (409). |
 | **DTOs separados das entidades** | Contrato da API estável e independente do modelo de persistência; evita lazy loading na serialização (`open-in-view=false`). | Serializar entidades diretamente. |
 | **`Clock` injetável, UTC** | Datas determinísticas nos testes e independentes do fuso do servidor. | `LocalDateTime.now()` direto. |
 | **Infraestrutura como código (CloudFormation), implantada pelo MCP da AWS** | O template em `infra/` é versionado e revisável: quem avalia lê e reproduz a infraestrutura, as decisões ficam registradas no próprio template e a remoção é um `delete-stack`. O deploy passa por *change set*, com a validação pré-deploy do CloudFormation antes de qualquer recurso ser criado. | Criar os recursos com comandos avulsos (console/CLI): mais rápido da primeira vez, mas não reproduzível nem auditável. CDK: abstrações úteis em projetos maiores, excesso para duas stacks pequenas. |
@@ -136,6 +137,9 @@ HTTP → ProdutoController (valida DTO)
    espaços nas pontas e é validado na API, no domínio e por uma CHECK constraint no banco. A identidade
    continua sendo o UUID, porque produtos distintos podem ter o mesmo nome (ex.: variações de tamanho).
    Um código de negócio único (SKU) e a edição do nome ficam para um módulo de catálogo.
+   **Consequência conhecida:** cadastrar "Teclado mecânico ABNT2" 5.000 vezes gera 5.000 registros, cada um
+   com UUID e saldo próprios, e o estoque do mesmo item fica dividido. O nome não pode ser a chave, porque
+   marcas e modelos diferentes podem ter o mesmo nome; a chave certa é o SKU (seção 7).
 8. Quantidades são inteiras e positivas, até 2.147.483.647 unidades por produto (limite de `Integer`). Uma
    entrada que ultrapassaria esse limite é rejeitada como regra de negócio (422), sem alterar o saldo.
 9. **A infraestrutura na AWS é temporária.** Ela existe só durante o processo seletivo e os dados gravados
@@ -158,6 +162,14 @@ HTTP → ProdutoController (valida DTO)
 - **Lock otimista sob altíssima disputa** num único produto pode esgotar as tentativas (resulta em 409).
 - **Sem autenticação/autorização** e sem paginação nas listagens.
 - Sem SKU (código único de negócio), sem edição do nome e sem exclusão de produto.
+- **Cadastro duplicado.** Nada impede cadastrar o mesmo produto várias vezes: cada `POST /api/produtos` cria
+  um UUID novo, e o saldo do mesmo item fica espalhado em vários registros.
+- **Sem log nem auditoria das operações.** O cadastro e as movimentações não geram linha de log, e o produto
+  não tem data de criação. O access log do Tomcat e os logs de acesso do CloudFront estão desligados. Na AWS,
+  o log da aplicação fica só no journal da EC2 (sem CloudWatch) e os logs do PostgreSQL não são exportados.
+  O único rastro de um cadastro é a própria linha no banco.
+- **Sem listagem de produtos** (`GET /api/produtos` responde 405) e sem health check dedicado (Actuator).
+- **Lacunas de teste**: sem teste de API para o 409 de conflito esgotado e sem integração contínua (CI).
 
 ### Infraestrutura na AWS (ambiente temporário de avaliação)
 
@@ -243,14 +255,15 @@ No Windows (PowerShell): `.\mvnw.cmd spring-boot:run`. A API sobe em `http://loc
 ./mvnw test
 ```
 
-58 testes em quatro níveis:
+60 testes em quatro níveis:
 
 | Classe | Tipo | O que garante |
 |---|---|---|
 | `ProdutoTest`, `ReservaBloqueioTest` | Unitário (domínio puro) | Regras de saldo, invariante, transições de status, rejeição sem efeito colateral |
 | `ExecutorTransacionalComRetryTest` | Unitário | Repete em conflito de versão, desiste após N tentativas, não repete erro de negócio |
 | `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez |
-| `EstoqueApiTest` | API (MockMvc) | Rotas, status HTTP (201/200/400/404/422), corpo `ProblemDetail`, contrato OpenAPI com servidor relativo |
+| `EstoqueApiTest` | API (MockMvc) | Rotas, status HTTP (200/400/404/405/422), erros em português (`ProblemDetail`) indicando o que corrigir, contrato OpenAPI com servidor relativo |
+| `GlobalExceptionHandlerTest` | Unitário | Erro inesperado: 500 em português, com identificador e sem detalhes internos |
 
 ### Exemplo rápido
 
@@ -264,6 +277,10 @@ curl localhost:8080/api/produtos/{id}
 # liberar reserva
 curl -X POST localhost:8080/api/reservas/{reservaId}/liberacao
 ```
+
+No Git Bash do Windows, texto com acento digitado direto no comando não sai em UTF-8, e a API responde
+400 informando que o corpo não é um JSON válido em UTF-8. Nesse caso, use o Swagger, envie o corpo por arquivo
+(`--data-binary @produto.json`) ou use o PowerShell (`Invoke-RestMethod`).
 
 ### Executar contra o Amazon RDS for PostgreSQL (perfil `rds`)
 
@@ -465,6 +482,28 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
     - **SPA em React ou Angular**, hospedada no S3 + CloudFront (o mesmo CloudFront da API).
     - Em todos os casos, a API precisaria de CORS configurado, autenticação OAuth2/OIDC (por exemplo,
       Microsoft Entra ID para Dynamics/ASP.NET) e versionamento do contrato.
+15. **Logs e auditoria** (identificado na revisão, não implementado):
+    - log estruturado (JSON, com ID de correlação) em cada operação: cadastro, entradas, saídas, reservas,
+      bloqueios e liberações;
+    - `data_criacao` em `produto` (migration `V3`) e uma tabela de movimentações com quem, quando, o quê e
+      quanto, consultável em `GET /api/produtos/{id}/movimentacoes` (concretiza o ledger do item 3);
+    - logs centralizados: CloudWatch Agent ou agente do Datadog na EC2 enviando para um log group com
+      retenção definida, logs de acesso do CloudFront no S3 e exportação dos logs do RDS;
+    - access log do Tomcat (`server.tomcat.accesslog.enabled=true`) para registrar toda requisição.
+16. **Identificação do produto por SKU** (não implementado): `sku` obrigatório e único, com `marca` e `modelo`
+    como atributos. Um `POST /api/produtos` com SKU já existente responderia 409 informando o produto
+    existente (ou haveria um *upsert* em `PUT /api/produtos/{sku}`), e novas unidades entrariam por
+    `entradas`, nunca por um novo cadastro. O nome continua não único, porque marcas diferentes podem
+    usar o mesmo nome.
+17. **Qualidade da API** (pontos da revisão ainda não implementados): `GET /api/produtos` paginado com
+    filtro por nome; Actuator com health check do banco (substituindo o health check improvisado da EC2);
+    GitHub Actions rodando os testes a cada push; teste de API do 409. As mensagens em português, os erros
+    de formato que indicam o campo e o tratamento do erro 500 já foram implementados.
+18. **Regras de negócio a decidir com a área**: limite máximo por operação (evitar erro de digitação de
+    milhões de unidades); formato e existência do `pedidoId` no sistema de pedidos; no bloqueio, `motivo`
+    obrigatório e `pedidoId` opcional (o PDF não exige pedido para bloquear, e uma avaria não tem pedido);
+    reservas repetidas do mesmo pedido e produto (somar ou rejeitar); liberação e efetivação parciais;
+    saída com tipo (venda, perda, ajuste).
 
 ---
 
@@ -505,6 +544,15 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
    infraestrutura, utilização de outra ferramenta para o frontend [...]; confira se as validações da
    aplicação fazem sentido, confira todo o passo a passo e compare com o PDF [...]"*. A revisão encontrou
    e corrigiu os pontos descritos em "Erros / limitações observados".
+10. *"Confira possíveis validações futuras e me fale pontos para corrigir no código"*, *"Onde fica salvo os
+    logs do cadastro de produtos?"* e *"Se eu cadastrar um produto como Teclado mecânico ABNT2 5000 vezes
+    ele sempre irá ter Id diferente?"*. A IA testou cada ponto no ambiente publicado antes de responder
+    (mensagens em inglês, reserva duplicada por reenvio, ausência de logs, cadastro duplicado com IDs
+    diferentes). Decidi não implementar agora e registrar tudo nas limitações e na seção 7.
+11. *"Faça os erros em português, e faça sempre um código 200 de preferência"*, esclarecido depois como
+    *"ao invés de sucesso 201, faça retornar sucesso 200 com um corpo; não mexa em casos como 40X ou 50X"*.
+    A IA avisou que responder 200 também nos erros quebraria clientes, monitoramento e health check, mediu
+    o impacto da troca 201 → 200 (só a camada web e os testes) e traduziu todas as mensagens de erro.
 
 ### Onde a IA mais ajudou
 - Gerar a estrutura completa (domínio, serviço, controllers, migration, testes) de forma consistente
@@ -519,6 +567,9 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
 - **cfn-guard → não implementado agora.** A IA ofereceu rodar a checagem de políticas no template. Para o
   case, o ganho seria baixo (só confirmaria desvios já conhecidos), então ficou registrado como melhoria
   futura na seção 7.
+- **201 Created → 200 nos cadastros.** A IA tinha seguido a convenção REST (201 + `Location`). Preferi que
+  todo sucesso responda 200 com o recurso no corpo, mantendo os códigos 4xx e 5xx nos erros, como a IA
+  recomendou ao desaconselhar 200 também para erros.
 - **cfn-lint → não utilizado.** Preferi não instalar uma ferramenta extra só para o lint; a validação ficou
   no `ValidateTemplate` e na validação pré-deploy do CloudFormation (limitação documentada).
 
@@ -555,6 +606,8 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
   revisão crítica dos casos de borda.
 - A seção de uso de IA misturava ajustes feitos pela própria IA com decisões minhas; foi reorganizada para
   responder exatamente ao que o PDF pede.
+- O exemplo de `curl` que a IA escreveu no README usa texto com acento e falha no Git Bash do Windows (o
+  terminal não envia UTF-8). A IA só percebeu ao testar no ambiente real; o README agora traz o aviso.
 
 ---
 

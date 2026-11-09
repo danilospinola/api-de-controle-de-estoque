@@ -71,8 +71,8 @@ class EstoqueApiTest {
 
         String reserva = postJson("/api/produtos/" + produtoId + "/reservas",
                 "{\"pedidoId\": \"PED-1\", \"quantidade\": 4}")
-                .andExpect(status().isCreated())
-                .andExpect(header().string("Location", containsString("/api/reservas/")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").exists())
                 .andExpect(jsonPath("$.status").value("ATIVA"))
                 .andExpect(jsonPath("$.produtoId").value(produtoId))
                 .andReturn().getResponse().getContentAsString();
@@ -106,7 +106,7 @@ class EstoqueApiTest {
 
         String bloqueio = postJson("/api/produtos/" + produtoId + "/bloqueios",
                 "{\"pedidoId\": \"PED-9\", \"motivo\": \"avaria\", \"quantidade\": 3}")
-                .andExpect(status().isCreated())
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("ATIVO"))
                 .andExpect(jsonPath("$.motivo").value("avaria"))
                 .andReturn().getResponse().getContentAsString();
@@ -131,8 +131,9 @@ class EstoqueApiTest {
 
         postJson("/api/produtos/" + produtoId + "/reservas", "{\"pedidoId\": \" \", \"quantidade\": 0}")
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.erros.pedidoId").exists())
-                .andExpect(jsonPath("$.erros.quantidade").exists());
+                .andExpect(jsonPath("$.title").value("Requisição inválida"))
+                .andExpect(jsonPath("$.erros.pedidoId").value("é obrigatório"))
+                .andExpect(jsonPath("$.erros.quantidade").value("deve ser maior que zero"));
     }
 
     @Test
@@ -154,7 +155,7 @@ class EstoqueApiTest {
     void entradaQueUltrapassariaOLimiteRetorna422() throws Exception {
         String corpo = postJson("/api/produtos",
                 "{\"nome\": \"" + NOME + "\", \"quantidadeInicial\": " + Integer.MAX_VALUE + "}")
-                .andExpect(status().isCreated())
+                .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
         String id = JsonPath.read(corpo, "$.id");
 
@@ -182,14 +183,48 @@ class EstoqueApiTest {
     @Test
     void uuidMalformadoRetorna400() throws Exception {
         mvc.perform(get("/api/produtos/{id}", "nao-e-um-uuid"))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.title").value("Requisição inválida"))
+                .andExpect(jsonPath("$.detail", containsString("'produtoId'")))
+                .andExpect(jsonPath("$.detail", containsString("UUID")));
+    }
+
+    @Test
+    void errosDeFormatoSaoEmPortuguesEApontamOQueCorrigir() throws Exception {
+        String produtoId = criarProduto(5);
+
+        mvc.perform(get("/api/produtos/{id}/reservas", produtoId).param("status", "QUALQUER"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail", containsString("ATIVA, LIBERADA, EFETIVADA")));
+
+        postJson("/api/produtos", "{\"nome\":")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.title").value("Requisição inválida"))
+                .andExpect(jsonPath("$.detail", containsString("JSON válido")));
+
+        postJson("/api/produtos/" + produtoId + "/entradas", "{\"quantidade\": \"dez\"}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail", containsString("'quantidade'")))
+                .andExpect(jsonPath("$.detail", containsString("número inteiro")));
+
+        mvc.perform(get("/api/produtos"))
+                .andExpect(status().isMethodNotAllowed())
+                .andExpect(header().exists("Allow"))
+                .andExpect(jsonPath("$.title").value("Método não permitido"))
+                .andExpect(jsonPath("$.detail", containsString("POST")));
+
+        mvc.perform(get("/api/endereco-inexistente"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.title").value("Recurso não encontrado"))
+                .andExpect(jsonPath("$.detail", containsString("não existe")));
     }
 
     @Test
     void recursoInexistenteRetorna404() throws Exception {
         mvc.perform(get("/api/produtos/{id}", UUID.randomUUID()))
                 .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.title").value("Recurso não encontrado"));
+                .andExpect(jsonPath("$.title").value("Recurso não encontrado"))
+                .andExpect(jsonPath("$.detail", containsString("não existe")));
         mvc.perform(post("/api/reservas/{id}/liberacao", UUID.randomUUID()))
                 .andExpect(status().isNotFound());
     }
@@ -197,7 +232,8 @@ class EstoqueApiTest {
     private String criarProduto(int quantidadeInicial) throws Exception {
         String corpo = postJson("/api/produtos",
                 "{\"nome\": \"" + NOME + "\", \"quantidadeInicial\": " + quantidadeInicial + "}")
-                .andExpect(status().isCreated())
+                .andExpect(status().isOk())
+                .andExpect(header().doesNotExist("Location"))
                 .andExpect(jsonPath("$.nome").value(NOME))
                 .andReturn().getResponse().getContentAsString();
         return JsonPath.read(corpo, "$.id");
