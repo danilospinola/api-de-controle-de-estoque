@@ -3,7 +3,7 @@ package com.example.controledeestoque.service;
 import com.example.controledeestoque.exception.ConflitoConcorrenciaException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -40,7 +40,9 @@ public class ExecutorTransacionalComRetry {
         for (int tentativa = 1; ; tentativa++) {
             try {
                 return transactionTemplate.execute(status -> operacao.get());
-            } catch (OptimisticLockingFailureException e) {
+            } catch (ConcurrencyFailureException e) {
+                // Conflito de versão (lock otimista) ou de lock/deadlock no banco: ambos se resolvem
+                // repetindo a operação inteira numa transação nova, com o saldo relido.
                 if (tentativa >= maxTentativas) {
                     log.warn("Conflito de concorrência não resolvido após {} tentativas", tentativa);
                     throw new ConflitoConcorrenciaException(

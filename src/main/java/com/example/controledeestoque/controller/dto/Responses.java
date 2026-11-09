@@ -16,13 +16,15 @@ public final class Responses {
     private Responses() {
     }
 
+    @Schema(description = "Saldo do produto: total = disponível + reservada + bloqueada")
     public record ProdutoResponse(
-            UUID id,
-            String nome,
-            int quantidadeTotal,
-            int quantidadeDisponivel,
-            int quantidadeReservada,
-            int quantidadeBloqueada,
+            @Schema(description = "Identificador do produto, usado nas demais operações") UUID id,
+            @Schema(description = "Nome do produto") String nome,
+            @Schema(description = "Unidades em estoque (disponível + reservada + bloqueada)") int quantidadeTotal,
+            @Schema(description = "Livres para saída, reserva ou bloqueio") int quantidadeDisponivel,
+            @Schema(description = "Separadas para pedidos (reservas ATIVAS)") int quantidadeReservada,
+            @Schema(description = "Indisponíveis para uso (bloqueios ATIVOS)") int quantidadeBloqueada,
+            @Schema(description = "Versão do registro para controle de concorrência; aumenta a cada alteração")
             long version) {
 
         public static ProdutoResponse de(Produto produto) {
@@ -37,11 +39,13 @@ public final class Responses {
         }
     }
 
+    @Schema(description = "Reserva de unidades de um produto para um pedido")
     public record ReservaResponse(
-            UUID id,
-            UUID produtoId,
-            String pedidoId,
-            int quantidade,
+            @Schema(description = "Identificador da reserva, usado para consultar, liberar ou efetivar") UUID id,
+            @Schema(description = "Produto reservado") UUID produtoId,
+            @Schema(description = "Pedido no sistema de origem") String pedidoId,
+            @Schema(description = "Unidades reservadas") int quantidade,
+            @Schema(description = "ATIVA (separada), LIBERADA (devolvida ao disponível) ou EFETIVADA (saiu do estoque)")
             StatusReserva status,
             @Schema(description = "Data e hora de criação, em UTC") LocalDateTime dataCriacao) {
 
@@ -56,13 +60,14 @@ public final class Responses {
         }
     }
 
+    @Schema(description = "Bloqueio de unidades de um produto")
     public record BloqueioResponse(
-            UUID id,
-            UUID produtoId,
-            String pedidoId,
-            String motivo,
-            int quantidade,
-            StatusBloqueio status,
+            @Schema(description = "Identificador do bloqueio, usado para consultar ou liberar") UUID id,
+            @Schema(description = "Produto bloqueado") UUID produtoId,
+            @Schema(description = "Solicitação no sistema de origem") String pedidoId,
+            @Schema(description = "Motivo informado (opcional)") String motivo,
+            @Schema(description = "Unidades bloqueadas") int quantidade,
+            @Schema(description = "ATIVO (indisponível) ou LIBERADO (devolvido ao disponível)") StatusBloqueio status,
             @Schema(description = "Data e hora de criação, em UTC") LocalDateTime dataCriacao) {
 
         public static BloqueioResponse de(Bloqueio bloqueio) {

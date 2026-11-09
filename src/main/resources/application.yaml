@@ -18,6 +18,9 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
+        # UPDATEs em ordem de chave primária: transações que alteram vários produtos (reserva de
+        # pedido) travam as linhas sempre na mesma ordem, evitando deadlock no PostgreSQL.
+        order_updates: true
 
   flyway:
     enabled: true
@@ -32,6 +35,16 @@ springdoc:
     path: /swagger-ui.html
     # A raiz "/" redireciona para o Swagger UI: o link entregue aos avaliadores pode ser só o domínio.
     use-root-path: true
+    # Seções numeradas na ordem do fluxo (1. Produtos ... 4. Bloqueios) e operações agrupadas por endereço.
+    tags-sorter: alpha
+    operations-sorter: alpha
+    doc-expansion: list
+    # "Try it out" já ativo, tempo de resposta visível e campo de busca por operação.
+    try-it-out-enabled: true
+    display-request-duration: true
+    filter: true
+    # Esconde a lista de schemas no fim da página; os modelos continuam visíveis em cada operação.
+    default-models-expand-depth: -1
 
 estoque:
   concorrencia:

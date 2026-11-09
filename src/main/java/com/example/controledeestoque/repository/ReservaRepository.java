@@ -12,4 +12,9 @@ public interface ReservaRepository extends JpaRepository<Reserva, UUID> {
     List<Reserva> findByProdutoIdOrderByDataCriacaoAsc(UUID produtoId);
 
     List<Reserva> findByProdutoIdAndStatusOrderByDataCriacaoAsc(UUID produtoId, StatusReserva status);
+
+    /** Reservas de um pedido (usa o índice ix_reserva_pedido). */
+    List<Reserva> findByPedidoIdOrderByDataCriacaoAsc(String pedidoId);
+
+    List<Reserva> findByPedidoIdAndStatusOrderByDataCriacaoAsc(String pedidoId, StatusReserva status);
 }

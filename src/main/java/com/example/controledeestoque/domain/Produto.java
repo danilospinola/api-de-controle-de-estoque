@@ -132,7 +132,7 @@ public class Produto {
     private void exigirDisponivel(int quantidade) {
         exigirPositiva(quantidade);
         if (quantidade > quantidadeDisponivel) {
-            throw new EstoqueInsuficienteException(quantidade, quantidadeDisponivel);
+            throw new EstoqueInsuficienteException(id, quantidade, quantidadeDisponivel);
         }
     }
 

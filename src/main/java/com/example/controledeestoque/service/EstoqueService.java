@@ -6,6 +6,7 @@ import com.example.controledeestoque.domain.Reserva;
 import com.example.controledeestoque.domain.StatusBloqueio;
 import com.example.controledeestoque.domain.StatusReserva;
 import com.example.controledeestoque.exception.RecursoNaoEncontradoException;
+import com.example.controledeestoque.exception.RegraNegocioException;
 import com.example.controledeestoque.repository.BloqueioRepository;
 import com.example.controledeestoque.repository.ProdutoRepository;
 import com.example.controledeestoque.repository.ReservaRepository;
@@ -15,7 +16,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -71,6 +76,38 @@ public class EstoqueService {
             Reserva reserva = Reserva.criar(produto, pedidoId, quantidade, agora());
             return reservaRepository.saveAndFlush(reserva);
         });
+    }
+
+    /** Um item de uma reserva de pedido. */
+    public record ItemReserva(UUID produtoId, int quantidade) {
+    }
+
+    /**
+     * Reserva vários produtos para o mesmo pedido, tudo ou nada: se um item falhar (produto
+     * inexistente, estoque insuficiente), a transação inteira é desfeita e nenhum saldo muda.
+     * <p>
+     * Os itens são processados em ordem fixa de {@code produtoId} (e o Hibernate ordena os UPDATEs),
+     * para que duas reservas concorrentes travem as linhas dos produtos sempre na mesma ordem e não
+     * entrem em deadlock no PostgreSQL.
+     */
+    public List<Reserva> reservarPedido(String pedidoId, List<ItemReserva> itens) {
+        exigirItensValidos(itens);
+        List<ItemReserva> emOrdem = itens.stream().sorted(Comparator.comparing(ItemReserva::produtoId)).toList();
+        return executor.executar(() -> {
+            List<Reserva> reservas = new ArrayList<>();
+            for (ItemReserva item : emOrdem) {
+                Produto produto = buscarProduto(item.produtoId());
+                reservas.add(Reserva.criar(produto, pedidoId, item.quantidade(), agora()));
+            }
+            return reservaRepository.saveAllAndFlush(reservas);
+        });
+    }
+
+    @Transactional(readOnly = true)
+    public List<Reserva> listarReservasDoPedido(String pedidoId, StatusReserva status) {
+        return status == null
+                ? reservaRepository.findByPedidoIdOrderByDataCriacaoAsc(pedidoId)
+                : reservaRepository.findByPedidoIdAndStatusOrderByDataCriacaoAsc(pedidoId, status);
     }
 
     public Reserva liberarReserva(UUID reservaId) {
@@ -148,6 +185,19 @@ public class EstoqueService {
     private Bloqueio buscarBloqueio(UUID id) {
         return bloqueioRepository.findById(id)
                 .orElseThrow(() -> new RecursoNaoEncontradoException("Bloqueio", id));
+    }
+
+    private static void exigirItensValidos(List<ItemReserva> itens) {
+        if (itens == null || itens.isEmpty()) {
+            throw new RegraNegocioException("O pedido deve ter ao menos um item");
+        }
+        Set<UUID> vistos = new HashSet<>();
+        for (ItemReserva item : itens) {
+            if (!vistos.add(item.produtoId())) {
+                throw new RegraNegocioException(("O produto %s aparece mais de uma vez no pedido; "
+                        + "informe a quantidade total em um único item").formatted(item.produtoId()));
+            }
+        }
     }
 
     private void exigirProdutoExistente(UUID id) {

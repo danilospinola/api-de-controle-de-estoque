@@ -170,7 +170,29 @@ class EstoqueApiTest {
         mvc.perform(get("/v3/api-docs"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.servers[0].url").value("/"))
-                .andExpect(jsonPath("$.info.title").value("Controle de Estoque"));
+                .andExpect(jsonPath("$.info.title").value("API de Controle de Estoque"));
+    }
+
+    @Test
+    void swaggerOrganizadoPorFluxoComErrosDocumentados() throws Exception {
+        mvc.perform(get("/v3/api-docs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tags[*].name",
+                        org.hamcrest.Matchers.contains("1. Produtos", "2. Movimentações", "3. Reservas", "4. Bloqueios")))
+                .andExpect(jsonPath("$.paths['/api/produtos'].post.tags[0]").value("1. Produtos"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.tags[0]").value("2. Movimentações"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/reservas'].post.tags[0]").value("3. Reservas"))
+                .andExpect(jsonPath("$.paths['/api/pedidos/{pedidoId}/reservas'].post.tags[0]").value("3. Reservas"))
+                .andExpect(jsonPath("$.paths['/api/reservas/{reservaId}/liberacao'].post.tags[0]").value("3. Reservas"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/bloqueios'].post.tags[0]").value("4. Bloqueios"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.responses['200'].description")
+                        .value("Sucesso"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.responses['422']").exists())
+                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.responses['404']").exists())
+                .andExpect(jsonPath("$.paths['/api/pedidos/{pedidoId}/reservas'].post.responses['404']").exists())
+                .andExpect(jsonPath("$.paths['/api/produtos'].post.responses['400']").exists())
+                .andExpect(jsonPath("$.paths['/api/produtos'].post.responses['422']").doesNotExist())
+                .andExpect(jsonPath("$.components.schemas.Problema").exists());
     }
 
     @Test
@@ -178,6 +200,42 @@ class EstoqueApiTest {
         mvc.perform(get("/"))
                 .andExpect(status().is3xxRedirection())
                 .andExpect(header().string("Location", containsString("swagger-ui")));
+    }
+
+    @Test
+    void reservaDeVariosProdutosPorPedidoETudoOuNada() throws Exception {
+        String teclado = criarProduto(5);
+        String mouse = criarProduto(1);
+        String itens = "{\"itens\": [{\"produtoId\": \"%s\", \"quantidade\": 2}, {\"produtoId\": \"%s\", \"quantidade\": %d}]}";
+
+        postJson("/api/pedidos/PED-API-1/reservas", itens.formatted(teclado, mouse, 3))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.title").value("Estoque insuficiente"))
+                .andExpect(jsonPath("$.detail", containsString(mouse)));
+        mvc.perform(get("/api/pedidos/{pedidoId}/reservas", "PED-API-1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(0)));
+
+        postJson("/api/pedidos/PED-API-1/reservas", itens.formatted(teclado, mouse, 1))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(2)))
+                .andExpect(jsonPath("$[0].pedidoId").value("PED-API-1"))
+                .andExpect(jsonPath("$[0].status").value("ATIVA"));
+        mvc.perform(get("/api/pedidos/{pedidoId}/reservas", "PED-API-1").param("status", "ATIVA"))
+                .andExpect(jsonPath("$", hasSize(2)));
+        mvc.perform(get("/api/produtos/{id}", teclado))
+                .andExpect(jsonPath("$.quantidadeReservada").value(2));
+    }
+
+    @Test
+    void reservaDePedidoValidaOsItensEmPortugues() throws Exception {
+        postJson("/api/pedidos/PED-API-2/reservas", "{\"itens\": []}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.erros.itens").value("deve ter ao menos um item"));
+        postJson("/api/pedidos/PED-API-2/reservas", "{\"itens\": [{\"quantidade\": 0}]}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.erros['itens[0].produtoId']").value("é obrigatório"))
+                .andExpect(jsonPath("$.erros['itens[0].quantidade']").value("deve ser maior que zero"));
     }
 
     @Test

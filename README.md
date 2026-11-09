@@ -26,6 +26,8 @@ quantidadeTotal = quantidadeDisponivel + quantidadeReservada + quantidadeBloquea
 | **Entrada** | `POST /api/produtos/{id}/entradas` | total ↑, disponível ↑ |
 | **Saída** | `POST /api/produtos/{id}/saidas` | total ↓, disponível ↓ (só se houver disponível) |
 | **Reservar** | `POST /api/produtos/{id}/reservas` | disponível ↓, reservada ↑ |
+| **Reservar pedido (vários produtos)** | `POST /api/pedidos/{pedidoId}/reservas` | em cada produto: disponível ↓, reservada ↑ (tudo ou nada) |
+| Listar reservas do pedido | `GET /api/pedidos/{pedidoId}/reservas?status=ATIVA` | — |
 | Consultar reserva | `GET /api/reservas/{id}` | — |
 | Listar reservas | `GET /api/produtos/{id}/reservas?status=ATIVA` | — |
 | **Liberar reserva** | `POST /api/reservas/{id}/liberacao` | reservada ↓, disponível ↑ |
@@ -45,7 +47,10 @@ Reserva:  ATIVA ──liberar──▶ LIBERADA        Bloqueio:  ATIVO ──li
 Estados finais (`LIBERADA`, `EFETIVADA`, `LIBERADO`) não aceitam novas transições.
 
 Documentação interativa (Swagger UI): `http://localhost:8080/swagger-ui.html` na execução local, ou o
-link da demonstração online acima. A raiz (`/`) também redireciona para o Swagger.
+link da demonstração online acima. A raiz (`/`) também redireciona para o Swagger, que está organizado na
+ordem do fluxo (**1. Produtos → 2. Movimentações → 3. Reservas → 4. Bloqueios**). A página inicial traz um
+roteiro de teste de um minuto, e cada operação descreve o efeito no saldo e os erros que pode devolver (400,
+404, 409, 422 e 500), com exemplos reais em português.
 
 ---
 
@@ -111,6 +116,7 @@ HTTP → ProdutoController (valida DTO)
 | **H2 (modo PostgreSQL) no perfil local/testes; PostgreSQL no perfil `rds`** | Executa e testa sem infraestrutura. A mesma migration roda nos dois bancos. | Testcontainers com PostgreSQL real (ver Limitações; não havia Docker no ambiente de desenvolvimento). |
 | **Erros RFC 9457 em português, com status semânticos** | 400 payload ou formato inválido (indicando o campo, o tipo ou os valores aceitos) · 404 inexistente · 405 método não permitido · 422 regra de negócio (estoque insuficiente, transição inválida) · 409 conflito de concorrência não resolvido · 500 erro inesperado (mensagem genérica com um identificador que também vai para o log, sem detalhes internos). As mensagens de validação são explícitas em português, então não dependem do idioma do servidor. O cliente diferencia "corrija o pedido" de "tente de novo". | 400 genérico para tudo; responder 200 também nos erros (descartado: clientes, monitoramento e health check passariam a tratar erro como sucesso). |
 | **Sucesso sempre 200, inclusive nos cadastros** | Decisão do projeto: toda resposta de sucesso usa o mesmo código e traz o recurso no corpo; o `id` do recurso criado vem no corpo. A mudança fica só na camada web (domínio, banco e infraestrutura não são afetados). | `201 Created` + `Location`, a convenção REST para criação. Ela distingue "criei agora" de "já existia", o que pesará quando houver idempotência e SKU (409). |
+| **Reserva de pedido com vários produtos, tudo ou nada** | Um pedido real tem vários itens. Reservá-los um a um deixaria o pedido reservado pela metade quando um item falha. Todos os itens entram numa única transação: se um falhar, nada é reservado e a mensagem diz qual produto faltou. Os itens são processados em ordem de `produtoId` e o Hibernate ordena os UPDATEs (`order_updates`), então transações concorrentes travam as linhas sempre na mesma ordem e não entram em deadlock; o retry também cobre conflitos de lock. | Várias chamadas à rota por produto, com compensação pelo cliente (liberar o que já foi reservado), frágil e não atômica. |
 | **DTOs separados das entidades** | Contrato da API estável e independente do modelo de persistência; evita lazy loading na serialização (`open-in-view=false`). | Serializar entidades diretamente. |
 | **`Clock` injetável, UTC** | Datas determinísticas nos testes e independentes do fuso do servidor. | `LocalDateTime.now()` direto. |
 | **Infraestrutura como código (CloudFormation), implantada pelo MCP da AWS** | O template em `infra/` é versionado e revisável: quem avalia lê e reproduz a infraestrutura, as decisões ficam registradas no próprio template e a remoção é um `delete-stack`. O deploy passa por *change set*, com a validação pré-deploy do CloudFormation antes de qualquer recurso ser criado. | Criar os recursos com comandos avulsos (console/CLI): mais rápido da primeira vez, mas não reproduzível nem auditável. CDK: abstrações úteis em projetos maiores, excesso para duas stacks pequenas. |
@@ -147,6 +153,9 @@ HTTP → ProdutoController (valida DTO)
    disponibilidade (ver limitações).
 10. **Datas em UTC.** `dataCriacao` é um `LocalDateTime` (como no modelo pedido) gerado sempre em UTC por um
     `Clock` injetado; o contrato OpenAPI informa isso.
+11. **Na reserva de pedido, cada produto aparece uma única vez**, com a quantidade total; um produto repetido
+    na lista é rejeitado. O pedido tem de 1 a 100 itens. A rota por produto continua disponível para
+    reservas avulsas.
 
 ---
 
@@ -255,13 +264,13 @@ No Windows (PowerShell): `.\mvnw.cmd spring-boot:run`. A API sobe em `http://loc
 ./mvnw test
 ```
 
-60 testes em quatro níveis:
+66 testes em quatro níveis:
 
 | Classe | Tipo | O que garante |
 |---|---|---|
 | `ProdutoTest`, `ReservaBloqueioTest` | Unitário (domínio puro) | Regras de saldo, invariante, transições de status, rejeição sem efeito colateral |
 | `ExecutorTransacionalComRetryTest` | Unitário | Repete em conflito de versão, desiste após N tentativas, não repete erro de negócio |
-| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez |
+| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez; reserva de pedido com vários produtos tudo ou nada, inclusive pedidos concorrentes com os produtos em ordens invertidas, sem deadlock |
 | `EstoqueApiTest` | API (MockMvc) | Rotas, status HTTP (200/400/404/405/422), erros em português (`ProblemDetail`) indicando o que corrigir, contrato OpenAPI com servidor relativo |
 | `GlobalExceptionHandlerTest` | Unitário | Erro inesperado: 500 em português, com identificador e sem detalhes internos |
 
@@ -503,7 +512,8 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
     milhões de unidades); formato e existência do `pedidoId` no sistema de pedidos; no bloqueio, `motivo`
     obrigatório e `pedidoId` opcional (o PDF não exige pedido para bloquear, e uma avaria não tem pedido);
     reservas repetidas do mesmo pedido e produto (somar ou rejeitar); liberação e efetivação parciais;
-    saída com tipo (venda, perda, ajuste).
+    saída com tipo (venda, perda, ajuste); liberação e efetivação do pedido inteiro numa só chamada (hoje
+    são feitas reserva por reserva).
 
 ---
 
@@ -553,6 +563,14 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
     *"ao invés de sucesso 201, faça retornar sucesso 200 com um corpo; não mexa em casos como 40X ou 50X"*.
     A IA avisou que responder 200 também nos erros quebraria clientes, monitoramento e health check, mediu
     o impacto da troca 201 → 200 (só a camada web e os testes) e traduziu todas as mensagens de erro.
+12. *"Para o pedido preciso do produtoId [...] não faz sentido eu colocar mais de um produto porque ele não
+    aceita no path"* e *"Faça a implementação desta rota"*. A IA criou `POST /api/pedidos/{pedidoId}/reservas`
+    (tudo ou nada) e identificou um risco novo que a mudança trazia: deadlock entre transações que alteram
+    vários produtos, prevenido com ordem fixa de atualização e coberto por teste de concorrência.
+13. *"Organize melhor o Swagger"*. A IA reorganizou as operações pelo fluxo de uso (antes agrupadas por
+    controller), adicionou o roteiro de teste e documentou automaticamente os erros de cada operação. Ao
+    conferir o Swagger rodando, notou no log um aviso do springdoc causado pela própria definição e corrigiu
+    antes de publicar.
 
 ### Onde a IA mais ajudou
 - Gerar a estrutura completa (domínio, serviço, controllers, migration, testes) de forma consistente
@@ -608,6 +626,11 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
   responder exatamente ao que o PDF pede.
 - O exemplo de `curl` que a IA escreveu no README usa texto com acento e falha no Git Bash do Windows (o
   terminal não envia UTF-8). A IA só percebeu ao testar no ambiente real; o README agora traz o aviso.
+- **A IA desenhou a reserva apenas por produto** (`POST /api/produtos/{id}/reservas`), seguindo o enunciado
+  ao pé da letra, e não previu que um pedido real tem vários itens. Um pedido com três produtos exigia três
+  chamadas independentes, sem atomicidade: se a terceira falhasse, o pedido ficava reservado pela metade e
+  o cliente teria de desfazer as outras. A falha foi apontada por mim, não pela IA, depois de todas as
+  revisões anteriores. A correção foi a rota `POST /api/pedidos/{pedidoId}/reservas`, tudo ou nada.
 
 ---
 

@@ -8,6 +8,7 @@ import com.example.controledeestoque.exception.EstoqueInsuficienteException;
 import com.example.controledeestoque.exception.RecursoNaoEncontradoException;
 import com.example.controledeestoque.exception.RegraNegocioException;
 import com.example.controledeestoque.repository.ReservaRepository;
+import com.example.controledeestoque.service.EstoqueService.ItemReserva;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -223,6 +224,87 @@ class EstoqueServiceIntegrationTest {
                 resultados.add(futuro.get(30, TimeUnit.SECONDS));
             }
             return resultados;
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void reservaDePedidoComVariosProdutosETudoOuNada() {
+        UUID teclado = service.criarProduto("Teclado", 5).getId();
+        UUID mouse = service.criarProduto("Mouse", 1).getId();
+
+        assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-1",
+                List.of(new ItemReserva(teclado, 2), new ItemReserva(mouse, 3))))
+                .isInstanceOf(EstoqueInsuficienteException.class)
+                .hasMessageContaining(mouse.toString());
+        assertSaldo(service.consultarProduto(teclado), 5, 5, 0, 0);
+        assertSaldo(service.consultarProduto(mouse), 1, 1, 0, 0);
+        assertThat(service.listarReservasDoPedido("PED-MULTI-1", null)).isEmpty();
+
+        List<Reserva> reservas = service.reservarPedido("PED-MULTI-1",
+                List.of(new ItemReserva(teclado, 2), new ItemReserva(mouse, 1)));
+
+        assertThat(reservas).hasSize(2).allMatch(r -> r.getStatus() == StatusReserva.ATIVA);
+        assertSaldo(service.consultarProduto(teclado), 5, 3, 2, 0);
+        assertSaldo(service.consultarProduto(mouse), 1, 0, 1, 0);
+        assertThat(service.listarReservasDoPedido("PED-MULTI-1", StatusReserva.ATIVA)).hasSize(2);
+    }
+
+    @Test
+    void reservaDePedidoRejeitaItensInvalidosSemAlterarNada() {
+        UUID produto = service.criarProduto("Monitor", 5).getId();
+
+        assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2", List.of()))
+                .isInstanceOf(RegraNegocioException.class);
+        assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2",
+                List.of(new ItemReserva(produto, 1), new ItemReserva(produto, 2))))
+                .isInstanceOf(RegraNegocioException.class)
+                .hasMessageContaining("mais de uma vez");
+        assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2",
+                List.of(new ItemReserva(produto, 1), new ItemReserva(UUID.randomUUID(), 1))))
+                .isInstanceOf(RecursoNaoEncontradoException.class);
+
+        assertSaldo(service.consultarProduto(produto), 5, 5, 0, 0);
+        assertThat(service.listarReservasDoPedido("PED-MULTI-2", null)).isEmpty();
+    }
+
+    @Test
+    void reservasDePedidoConcorrentesEmOrdensInvertidasNaoVendemAMaisNemTravam() throws Exception {
+        UUID a = service.criarProduto("Produto A", 5).getId();
+        UUID b = service.criarProduto("Produto B", 5).getId();
+        int pedidos = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(pedidos);
+        CountDownLatch largada = new CountDownLatch(1);
+        try {
+            List<Future<Boolean>> futuros = new ArrayList<>();
+            for (int i = 0; i < pedidos; i++) {
+                // Metade dos pedidos lista A antes de B e a outra metade, B antes de A.
+                List<ItemReserva> itens = i % 2 == 0
+                        ? List.of(new ItemReserva(a, 1), new ItemReserva(b, 1))
+                        : List.of(new ItemReserva(b, 1), new ItemReserva(a, 1));
+                String pedido = "PED-CONC-" + i;
+                futuros.add(pool.submit(() -> {
+                    largada.await();
+                    try {
+                        service.reservarPedido(pedido, itens);
+                        return true;
+                    } catch (EstoqueInsuficienteException e) {
+                        return false;
+                    }
+                }));
+            }
+            largada.countDown();
+            long sucessos = 0;
+            for (Future<Boolean> futuro : futuros) {
+                if (futuro.get(30, TimeUnit.SECONDS)) {
+                    sucessos++;
+                }
+            }
+
+            assertThat(sucessos).isEqualTo(5);
+            assertSaldo(service.consultarProduto(a), 5, 0, 5, 0);
+            assertSaldo(service.consultarProduto(b), 5, 0, 5, 0);
         } finally {
             pool.shutdownNow();
         }
