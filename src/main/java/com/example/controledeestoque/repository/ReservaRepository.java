@@ -12,6 +12,9 @@ import java.util.UUID;
 /**
  * Todas as consultas já trazem o produto junto ({@code @EntityGraph}): a resposta da API mostra o SKU
  * do produto e é montada fora da transação ({@code open-in-view=false}), onde o lazy loading falharia.
+ * <p>
+ * A ordem é sempre determinística: por data de criação e, no empate (os itens de um mesmo pedido são
+ * criados no mesmo instante), pelo SKU e pelo id.
  */
 public interface ReservaRepository extends JpaRepository<Reserva, UUID> {
 
@@ -20,15 +23,15 @@ public interface ReservaRepository extends JpaRepository<Reserva, UUID> {
     Optional<Reserva> findById(UUID id);
 
     @EntityGraph(attributePaths = "produto")
-    List<Reserva> findByProdutoIdOrderByDataCriacaoAsc(UUID produtoId);
+    List<Reserva> findByProdutoIdOrderByDataCriacaoAscIdAsc(UUID produtoId);
 
     @EntityGraph(attributePaths = "produto")
-    List<Reserva> findByProdutoIdAndStatusOrderByDataCriacaoAsc(UUID produtoId, StatusReserva status);
+    List<Reserva> findByProdutoIdAndStatusOrderByDataCriacaoAscIdAsc(UUID produtoId, StatusReserva status);
 
     /** Reservas de um pedido (usa o índice ix_reserva_pedido). */
     @EntityGraph(attributePaths = "produto")
-    List<Reserva> findByPedidoIdOrderByDataCriacaoAsc(String pedidoId);
+    List<Reserva> findByPedidoIdOrderByDataCriacaoAscProdutoSkuAscIdAsc(String pedidoId);
 
     @EntityGraph(attributePaths = "produto")
-    List<Reserva> findByPedidoIdAndStatusOrderByDataCriacaoAsc(String pedidoId, StatusReserva status);
+    List<Reserva> findByPedidoIdAndStatusOrderByDataCriacaoAscProdutoSkuAscIdAsc(String pedidoId, StatusReserva status);
 }

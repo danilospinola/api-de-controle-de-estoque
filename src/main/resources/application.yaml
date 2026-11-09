@@ -26,6 +26,23 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+  # Contrato JSON estrito: um erro de digitação ou de tipo responde 400, em vez de ser ignorado ou
+  # convertido sem aviso. Com os padrões do Jackson, "quantidadeIncial" criava o produto com 0 unidades,
+  # 2.7 virava 2 e {"quantidade":1,"quantidade":9} valia 9. Texto em campo inteiro ("10") é recusado
+  # em config/JsonConfig.
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+      accept-float-as-int: false
+    read:
+      strict-duplicate-detection: true
+    factory:
+      constraints:
+        read:
+          # Tamanho máximo do corpo, em bytes. O maior corpo legítimo (pedido com 100 itens) tem cerca
+          # de 8 KB; sem limite, um JSON gigante esgotaria a memória da instância pequena da demo.
+          max-document-length: 100000
+
 server:
   error:
     include-stacktrace: never

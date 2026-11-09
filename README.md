@@ -9,6 +9,28 @@ garantia de consistência sob concorrência. Persistência em **PostgreSQL (Amaz
 > Swagger UI da API rodando na AWS, gravando no Amazon RDS. Fica no ar só durante o processo seletivo.
 > Para rodar localmente, sem nenhuma infraestrutura, veja a seção 6.
 
+### Guia rápido para a avaliação
+
+- **Testar sem instalar nada:** abra a demonstração; a página inicial do Swagger tem um roteiro de um minuto.
+- **Rodar localmente** (JDK 17+, sem banco externo): `./mvnw spring-boot:run` e abra
+  `http://localhost:8080`. **Testes:** `./mvnw test` (97 testes).
+
+| O que o case pede | Onde está |
+|---|---|
+| Identificação do produto e quantidades total, disponível, reservada e bloqueada | `Produto` (SKU único + quatro saldos, invariante `total = disponível + reservada + bloqueada`); `GET /api/produtos/{sku}` |
+| Entrada; saída só com disponível suficiente | `POST /api/produtos/{sku}/entradas` e `/saidas`; regra em `Produto.saida` |
+| Reserva e bloqueio identificáveis, consultáveis e liberáveis | `Reserva` e `Bloqueio` com `id`; `GET /api/reservas/{id}`, `GET /api/bloqueios/{id}` e as rotas `/liberacao` |
+| Várias reservas e bloqueios simultâneos, de solicitações diferentes | premissa 5 (seção 4); testes de concorrência (seção 6) |
+| Nada acima do disponível e nenhuma operação inválida deixando o estoque inconsistente | domínio valida antes de alterar, transação única, lock otimista com retry e CHECKs no banco (seção 3) |
+| Outras regras, validações e premissas documentadas | seções 3 e 4 |
+| README: visão geral, arquitetura, decisões, premissas, limitações, execução e produção | seções 1 a 7 |
+| Testes automatizados | seção 6 (unitários, integração com concorrência real e contrato HTTP) |
+| Uso de IA: prompts, onde ajudou, sugestões modificadas e erros | seção 8 |
+| Cinco aspectos de engenharia | seção 9 |
+
+Além do pedido: efetivação de reserva (consumo), reserva de pedido com vários produtos (tudo ou nada), SKU
+único como chave de negócio e a API publicada na AWS para a avaliação.
+
 ---
 
 ## 1. Visão geral da solução
@@ -73,7 +95,7 @@ src/main/java/com/example/controledeestoque
 ├── domain/            # Produto, Reserva, Bloqueio, enums de status — regras e invariantes
 ├── repository/        # Spring Data JPA
 ├── exception/         # Exceções de negócio
-└── config/            # Clock injetável e contrato OpenAPI (servidor relativo)
+└── config/            # Clock injetável, contrato OpenAPI (servidor relativo) e leitura estrita do JSON
 src/main/resources
 ├── application.yaml                 # Perfil padrão (H2) e perfil "rds" (PostgreSQL)
 └── db/migration/V1, V2, V3          # Schema versionado (Flyway): tabelas e CHECKs, pedido preenchido, SKU único
@@ -117,13 +139,14 @@ HTTP → ProdutoController (valida DTO)
 | **CHECK constraints no banco** (invariante e não-negatividade) | Defesa em profundidade: mesmo um bug, script manual ou outro serviço não consegue gravar estado inconsistente. Há teste provando isso. | Confiar só na aplicação. |
 | **Flyway + `ddl-auto=validate`** | Schema versionado, revisável e reproduzível; Hibernate só valida o mapeamento. | `ddl-auto=update`: inadequado para produção. |
 | **H2 (modo PostgreSQL) no perfil local/testes; PostgreSQL no perfil `rds`** | Executa e testa sem infraestrutura. A mesma migration roda nos dois bancos. | Testcontainers com PostgreSQL real (ver Limitações; não havia Docker no ambiente de desenvolvimento). |
-| **Erros RFC 9457 em português, com status semânticos** | 400 payload ou formato inválido (indicando o campo, o tipo ou os valores aceitos) · 404 inexistente · 405 método não permitido · 422 regra de negócio (estoque insuficiente, transição inválida) · 409 conflito de concorrência não resolvido · 500 erro inesperado (mensagem genérica com um identificador que também vai para o log, sem detalhes internos). As mensagens de validação são explícitas em português, então não dependem do idioma do servidor. O cliente diferencia "corrija o pedido" de "tente de novo". | 400 genérico para tudo; responder 200 também nos erros (descartado: clientes, monitoramento e health check passariam a tratar erro como sucesso). |
+| **Erros RFC 9457 em português, com status semânticos** | 400 payload ou formato inválido (indicando o campo, o tipo ou os valores aceitos) · 404 inexistente · 405 método não permitido · 413 corpo acima do limite · 422 regra de negócio (estoque insuficiente, transição inválida) · 409 conflito de concorrência não resolvido · 500 erro inesperado (mensagem genérica com um identificador que também vai para o log, sem detalhes internos). As mensagens de validação são explícitas em português, então não dependem do idioma do servidor. O cliente diferencia "corrija o pedido" de "tente de novo". | 400 genérico para tudo; responder 200 também nos erros (descartado: clientes, monitoramento e health check passariam a tratar erro como sucesso). |
 | **Sucesso sempre 200, inclusive nos cadastros** | Decisão do projeto: toda resposta de sucesso usa o mesmo código e traz o recurso no corpo (o `id` da reserva ou do bloqueio criado vem no corpo). A mudança fica só na camada web (domínio, banco e infraestrutura não são afetados). | `201 Created` + `Location`, a convenção REST para criação. Ela distingue "criei agora" de "já existia", o que pesará quando houver idempotência e SKU (409). |
 | **SKU único como chave de negócio do produto** | Impede que o mesmo item exista em dois registros com saldos separados. O SKU é normalizado para maiúsculas, então a caixa não cria duplicatas. Um SKU repetido responde 409 e a mensagem aponta a entrada de estoque desse SKU; em cadastros simultâneos, a constraint única do banco decide quem vence e o outro recebe o mesmo 409. | Nome único (recusaria produtos diferentes com o mesmo nome); cadastro que soma unidades a um SKU existente (*upsert*), que misturaria cadastro com entrada de estoque sem o cliente perceber. |
 | **SKU como identificador do produto nas rotas; UUID só no banco** | É o código que quem opera o estoque conhece: as rotas ficam legíveis (`/api/produtos/TEC-LOGI-K120/reservas`), quem integra não precisa guardar um UUID nem consultar antes de operar, e a busca separada por SKU deixou de ser necessária. O UUID continua como chave primária e nas chaves estrangeiras de reserva e bloqueio, então a troca não exigiu migration e não altera o desempenho dos *joins*. A busca pelo SKU usa o índice da constraint única. Reservas e bloqueios mantêm o UUID, porque não têm código de negócio. **Trade-offs aceitos:** (1) o SKU passa a ser um contrato público e precisa ser **imutável**: corrigir um SKU digitado errado quebraria URLs e integrações, ao passo que o UUID nunca muda (hoje não existe edição de SKU); (2) o SKU aparece em URLs, logs de acesso e histórico do navegador (não é dado sensível, mas fica exposto); (3) as respostas mostram o `sku` em vez do `produtoId`, então reservas e bloqueios precisam carregar o produto junto (`@EntityGraph` nas consultas, porque a resposta é montada fora da transação, com `open-in-view=false`); (4) as rotas de produto não validam o formato do SKU no endereço: um SKU fora do formato simplesmente não existe e responde 404. | Manter o UUID nas rotas com uma busca por SKU (era o desenho anterior: estável mesmo se o SKU mudasse, mas obrigava o cliente a descobrir o UUID antes de operar); aceitar os dois no mesmo endereço (ambíguo, porque um SKU pode ter o formato de um UUID); rota com prefixo, como `/api/produtos/sku/{sku}` (mais explícita, porém mais longa e duplicaria todas as rotas). |
-| **Reserva de pedido com vários produtos, tudo ou nada** | Um pedido real tem vários itens. Reservá-los um a um deixaria o pedido reservado pela metade quando um item falha. Todos os itens entram numa única transação: se um falhar, nada é reservado e a mensagem diz qual SKU faltou. Os itens são processados em ordem de SKU e o Hibernate ordena os UPDATEs pela chave primária (`order_updates`), então transações concorrentes travam as linhas sempre na mesma ordem e não entram em deadlock; o retry também cobre conflitos de lock. | Várias chamadas à rota por produto, com compensação pelo cliente (liberar o que já foi reservado), frágil e não atômica. |
+| **Reserva de pedido com vários produtos, tudo ou nada** | Um pedido real tem vários itens. Reservá-los um a um deixaria o pedido reservado pela metade quando um item falha. Todos os itens entram numa única transação, com os produtos carregados numa só consulta: se um falhar, nada é reservado e a mensagem diz qual SKU faltou. Os itens são processados em ordem de SKU e o Hibernate ordena os UPDATEs pela chave primária (`order_updates`), então transações concorrentes travam as linhas sempre na mesma ordem e não entram em deadlock; o retry também cobre conflitos de lock. | Várias chamadas à rota por produto, com compensação pelo cliente (liberar o que já foi reservado), frágil e não atômica. |
+| **Contrato JSON estrito e limites de entrada** | Num estoque, aceitar um valor "quase certo" é pior que recusar: com os padrões do Jackson, `"quantidade": 2.7` virava 2, `"3"` virava 3, um erro de digitação como `quantidadeIncial` era ignorado (o produto nascia com 0 unidades) e uma chave repetida valia o último valor. Agora tudo isso responde 400 com o campo e, no caso do campo desconhecido, a lista dos campos aceitos. Os textos (`nome`, `marca`, `pedidoId`, `motivo`) não aceitam caracteres de controle (quebra de linha, tabulação, caractere nulo), que quebram exibição, permitem forjar linhas de log e, no caso do nulo, eram recusados pelo PostgreSQL com um 409 enganoso. O corpo tem limite de 100 KB (413), porque a API é pública e a instância da demo é pequena. O `pedidoId` do endereço segue as mesmas regras do corpo. **Trade-off:** um cliente que envie campos extras (por exemplo, de uma versão mais nova do contrato) passa a receber 400; mudanças de contrato exigem versionar a API. | Padrões do Jackson (tolerantes) com validação só no domínio; `@Pattern` para caracteres de controle (descartado: a regex que aceita espaços nas pontas fica ambígua e pode levar tempo exponencial, ReDoS). |
 | **DTOs separados das entidades** | Contrato da API estável e independente do modelo de persistência; evita lazy loading na serialização (`open-in-view=false`). | Serializar entidades diretamente. |
-| **`Clock` injetável, UTC** | Datas determinísticas nos testes e independentes do fuso do servidor. | `LocalDateTime.now()` direto. |
+| **`Clock` injetável, UTC, na precisão do banco** | Datas determinísticas nos testes e independentes do fuso do servidor. O instante é cortado em microssegundos, a precisão da coluna: sem isso, a criação devolvia nanossegundos que o banco descarta, e a mesma reserva aparecia com duas datas. As listagens desempatam pela ordem do SKU e do id, então a ordem é sempre a mesma (os itens de um pedido são criados no mesmo instante). | `LocalDateTime.now()` direto. |
 | **Infraestrutura como código (CloudFormation), implantada pelo MCP da AWS** | O template em `infra/` é versionado e revisável: quem avalia lê e reproduz a infraestrutura, as decisões ficam registradas no próprio template e a remoção é um `delete-stack`. O deploy passa por *change set*, com a validação pré-deploy do CloudFormation antes de qualquer recurso ser criado. | Criar os recursos com comandos avulsos (console/CLI): mais rápido da primeira vez, mas não reproduzível nem auditável. CDK: abstrações úteis em projetos maiores, excesso para duas stacks pequenas. |
 | **API publicada para os avaliadores: EC2 `t4g.micro` + CloudFront** | Os avaliadores usam o Swagger e gravam no RDS sem receber senha de banco nem acesso à conta AWS. A `t4g.micro` é a menor instância aceita pelo plano Free (as `nano` não são, e 512 MiB é pouco para Spring Boot). O CloudFront dá HTTPS gratuito e permite que a EC2 aceite tráfego só dele. A EC2 lê a senha no Secrets Manager pelo papel IAM. | Abrir o banco para os IPs dos avaliadores (exige compartilhar a senha); GitHub Pages (só hospeda o Swagger estático, sem executar chamadas); ECS Fargate + ALB (mais robusto, porém mais caro e complexo para uma demonstração). |
 | **RDS mínimo e temporário** (PostgreSQL 18.6, `db.t4g.micro`, Single-AZ) | Menor custo elegível ao plano Free da conta (cerca de US$ 18/mês, pagos com créditos), suficiente para demonstrar a solução durante o processo seletivo. Mantém o que não custa nada a mais: criptografia, TLS obrigatório, proteção contra exclusão e senha gerenciada no Secrets Manager. Sem backup: os dados são descartáveis. | Multi-AZ (bloqueado no plano Free) e a configuração completa de produção (seção 7). |
@@ -140,8 +163,9 @@ HTTP → ProdutoController (valida DTO)
    da reserva** (`EFETIVADA`), que dá baixa no total.
 4. **`pedidoId` é uma referência externa** (sistema de pedidos), armazenada como `String`, sem FK
    física, pois não existe entidade `Pedido` neste serviço. É obrigatório, inclusive no bloqueio, porque o
-   modelo pedido associa todo bloqueio a uma solicitação. `motivo` é opcional. Os textos (`nome`,
-   `pedidoId`, `motivo`) são gravados sem espaços nas pontas e validados na API, no domínio e no banco.
+   modelo pedido associa todo bloqueio a uma solicitação. `motivo` é opcional. Os textos (`nome`, `marca`,
+   `pedidoId`, `motivo`) são gravados sem espaços nas pontas, não aceitam caracteres de controle e são
+   validados na API e no domínio; o preenchimento também é garantido pelo banco.
 5. **Um produto pode ter várias reservas/bloqueios ativos**, inclusive do mesmo pedido.
 6. **Reserva e bloqueio são integrais**: liberação parcial não é suportada (libera-se a quantidade inteira).
 7. **O produto é identificado pelo negócio por um SKU único.** O `sku` é obrigatório, tem até 50
@@ -153,15 +177,18 @@ HTTP → ProdutoController (valida DTO)
    o UUID do produto é só a chave técnica do banco e não aparece na API.
    As três regras são validadas na API, no domínio e no banco (constraint única e CHECKs da migration `V3`).
    Os produtos que já existiam no RDS receberam um SKU provisório, `LEGADO-<id>`.
-8. Quantidades são inteiras e positivas, até 2.147.483.647 unidades por produto (limite de `Integer`). Uma
-   entrada que ultrapassaria esse limite é rejeitada como regra de negócio (422), sem alterar o saldo.
+8. **Quantidades são números inteiros e positivos**, até 2.147.483.647 unidades por produto (limite de
+   `Integer`). Decimais (`2.7`, `2.0`), notação científica (`1e1`) e texto (`"3"`) são recusados com 400, em
+   vez de arredondados. Uma entrada que ultrapassaria o limite é rejeitada como regra de negócio (422), sem
+   alterar o saldo.
 9. **A infraestrutura na AWS é temporária.** Ela existe só durante o processo seletivo e os dados gravados
    no RDS são descartáveis. Por isso o ambiente prioriza custo baixo e simplicidade, não alta
    disponibilidade (ver limitações).
 10. **Datas em UTC.** `dataCriacao` é um `LocalDateTime` (como no modelo pedido) gerado sempre em UTC por um
-    `Clock` injetado; o contrato OpenAPI informa isso.
+    `Clock` injetado, na precisão de microssegundos do banco; o contrato OpenAPI informa isso.
 11. **Na reserva de pedido, cada SKU aparece uma única vez**, com a quantidade total; um SKU repetido
-    na lista (mesmo em outra caixa, como `tec-01` e `TEC-01`) é rejeitado. O pedido tem de 1 a 100 itens. A rota por produto continua disponível para
+    na lista (mesmo em outra caixa, como `tec-01` e `TEC-01`) é rejeitado. O pedido tem de 1 a 100 itens,
+    e todas as suas reservas recebem o mesmo instante de criação. A rota por produto continua disponível para
     reservas avulsas.
 
 ---
@@ -280,14 +307,14 @@ No Windows (PowerShell): `.\mvnw.cmd spring-boot:run`. A API sobe em `http://loc
 ./mvnw test
 ```
 
-85 testes em quatro níveis:
+97 testes em quatro níveis:
 
 | Classe | Tipo | O que garante |
 |---|---|---|
-| `ProdutoTest`, `ReservaBloqueioTest` | Unitário (domínio puro) | Regras de saldo, invariante, transições de status, rejeição sem efeito colateral, formato e normalização do SKU |
+| `ProdutoTest`, `ReservaBloqueioTest` | Unitário (domínio puro) | Regras de saldo, invariante, transições de status, rejeição sem efeito colateral, formato e normalização do SKU, textos sem caracteres de controle |
 | `ExecutorTransacionalComRetryTest` | Unitário | Repete em conflito de versão, desiste após N tentativas, não repete erro de negócio |
-| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez; reserva de pedido com vários produtos tudo ou nada, inclusive pedidos concorrentes com os produtos em ordens invertidas, sem deadlock; SKU único mesmo com 8 cadastros simultâneos do mesmo SKU (só um vence, os outros recebem 409); todas as operações pelo SKU em qualquer caixa; consultas de reserva e bloqueio já trazem o produto para uso fora da transação |
-| `EstoqueApiTest` | API (MockMvc) | Rotas por SKU (inclusive em minúsculas), status HTTP (200/400/404/405/409/422), erros em português (`ProblemDetail`) indicando o que corrigir, contrato OpenAPI com servidor relativo e sem rotas por UUID de produto |
+| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez; reserva de pedido com vários produtos tudo ou nada, inclusive pedidos concorrentes com os produtos em ordens invertidas, sem deadlock; SKU único mesmo com 8 cadastros simultâneos do mesmo SKU (só um vence, os outros recebem 409); todas as operações pelo SKU em qualquer caixa; consultas de reserva e bloqueio já trazem o produto para uso fora da transação; data devolvida na criação igual à gravada; ordem determinística das reservas do pedido |
+| `EstoqueApiTest` | API (MockMvc) | Rotas por SKU (inclusive em minúsculas), status HTTP (200/400/404/405/409/422), erros em português (`ProblemDetail`) indicando o que corrigir, contrato OpenAPI com servidor relativo e sem rotas por UUID de produto; JSON estrito (decimal, texto em campo inteiro, campo desconhecido, chave repetida e corpo acima de 100 KB → 413) sem alterar o saldo; caracteres de controle e `pedidoId` do endereço com erro por campo |
 | `GlobalExceptionHandlerTest` | Unitário | Erro inesperado: 500 em português, com identificador e sem detalhes internos |
 
 ### Exemplo rápido
@@ -526,8 +553,10 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
     alternativo; e substituição dos SKUs provisórios `LEGADO-<id>` pelos códigos reais.
 17. **Qualidade da API** (pontos da revisão ainda não implementados): `GET /api/produtos` paginado com
     filtro por nome; Actuator com health check do banco (substituindo o health check improvisado da EC2);
-    GitHub Actions rodando os testes a cada push; teste de API do 409. As mensagens em português, os erros
-    de formato que indicam o campo e o tratamento do erro 500 já foram implementados.
+    GitHub Actions rodando os testes a cada push; teste de API do 409; envio em lote ao banco
+    (`hibernate.jdbc.batch_size`) para pedidos com muitos itens. As mensagens em português, os erros de formato
+    que indicam o campo, o JSON estrito, o limite de tamanho do corpo e o tratamento do erro 500 já foram
+    implementados.
 18. **Regras de negócio a decidir com a área**: limite máximo por operação (evitar erro de digitação de
     milhões de unidades); formato e existência do `pedidoId` no sistema de pedidos; no bloqueio, `motivo`
     obrigatório e `pedidoId` opcional (o PDF não exige pedido para bloquear, e uma avaria não tem pedido);
@@ -538,8 +567,6 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
 ---
 
 ## 8. Uso de IA
-
-> Seção a ser revisada e complementada pelo candidato com sua própria análise.
 
 Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
 
@@ -603,12 +630,24 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
     imutável), trocou o identificador do produto em todas as rotas, na reserva de pedido e nas respostas,
     removeu a busca separada por SKU e manteve o UUID só no banco, sem migration. Implantou na AWS e validou
     o fluxo completo pelo link público.
+16. *"Veja se as validações estão todas okays [...] veja se o modelo de negócio está de acordo com o projeto
+    sugerido no pdf [...] confira se todo o código está okay ou se é necessário otimizar"* e *"E ocorre quando
+    coloco a quantidade 2.7?"*. Antes de mudar qualquer coisa, a IA mandou entradas de borda para a demo
+    (PostgreSQL real) e mediu o comportamento: decimal arredondado, campo digitado errado ignorado, chave
+    repetida, caractere nulo virando 409, quebra de linha aceita. Corrigiu cada caso com teste, além de dois
+    defeitos de código (data com precisão maior que a gravada e ordem das listagens não determinística) e de
+    uma otimização (uma consulta só na reserva de pedido). Depois repetiu a mesma bateria na demo.
+17. *"Faça uma atualização final no arquivo .md e prepare um pacote final para ser enviado para os
+    avaliadores"*. A IA acrescentou ao README um guia que liga cada requisito do PDF ao código e à seção
+    correspondente, e verificou o repositório num clone limpo, como o avaliador fará.
 
 ### Onde a IA mais ajudou
 - Gerar a estrutura completa (domínio, serviço, controllers, migration, testes) de forma consistente
   com o Spring Boot 4 (novos starters modulares, pacotes de teste reorganizados).
 - Desenhar os testes de concorrência e **verificar que eles realmente exercitam o retry**
   (117 conflitos de versão resolvidos numa execução), em vez de confiar apenas no "passou".
+- Sondar o ambiente real com entradas de borda (decimal, campo com erro de digitação, caractere nulo) antes
+  de corrigir: isso revelou falhas que 85 testes verdes não pegavam, e a mesma bateria confirmou a correção.
 
 ### Sugestões da IA que modifiquei ou não utilizei
 - **Backup de 7 dias → sem backup.** A skill de RDS aplicou 7 dias de retenção como padrão de produção. Decidi
@@ -646,9 +685,14 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
 - Na troca do UUID pelo SKU, a IA antecipou que mostrar o `sku` nas respostas de reserva e bloqueio daria
   erro 500: o produto é carregado sob demanda (*lazy*) e a resposta é montada fora da transação. A correção
   foi carregar o produto junto nas consultas (`@EntityGraph`), com um teste que lê o SKU fora da transação.
+- Na validação de caracteres de controle, a IA descartou `@Pattern`: a regex que aceita espaços nas pontas
+  fica ambígua e pode levar tempo exponencial num corpo grande (ReDoS). Usou um validador linear, com a mesma
+  regra do domínio. Pelo mesmo motivo de robustez, limitou o corpo a 100 KB, já que a API da demo é pública e
+  roda com 400 MB de memória.
 
 ### Erros / limitações observados
-- O modelo de i.a incialmente não havia coberto erros de modelagem para atributos na entidade produtos para futuros testes feitos por humanos, o campo "Nome" foi um deles
+- O modelo de IA inicialmente não havia coberto erros de modelagem para atributos na entidade produtos para
+  futuros testes feitos por humanos; o campo "Nome" foi um deles.
 - O servidor MCP da AWS falhou ao conectar com a mensagem genérica *Invalid request parameters*. A causa
   real era a sessão do `aws login` expirada; o diagnóstico só veio ao testar o proxy do MCP fora da sessão.
 - A IA configurou retenção de backup de 7 dias, padrão da skill de RDS, sem saber que o plano Free limita
@@ -684,7 +728,18 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
 - Num teste novo, a IA usou `List.getFirst()`, que só existe a partir do Java 21, num projeto com alvo Java 17.
   A máquina de desenvolvimento roda Java 21, mas o compilador respeita o alvo e recusou o código. O erro foi
   pego na primeira compilação e trocado por `get(0)`: um lembrete de que o alvo do projeto, e não a JDK
-  instalada, define a API disponível.
+  instalada, define a API disponível. Na revisão seguinte, a IA repetiu o mesmo tipo de erro com
+  `List.reversed()` (também do Java 21) e só percebeu ao reler o próprio teste, antes de compilar.
+- **A IA confiou nos padrões tolerantes do Jackson.** Em todas as revisões anteriores, ninguém testou o que a
+  API fazia com um JSON "quase certo": `"quantidade": 2.7` dava baixa de 2 unidades com resposta 200, um erro
+  de digitação em `quantidadeInicial` criava o produto com 0 unidades sem aviso, e numa chave repetida valia o
+  último valor. Os 85 testes passavam porque só cobriam entradas bem formadas ou claramente erradas. A falha
+  só apareceu quando a revisão mandou entradas de borda ao ambiente real; a correção foi o contrato JSON
+  estrito (seção 3).
+- **A data devolvida na criação não era a gravada.** O código gerado pela IA usava a precisão de
+  nanossegundos do Java, mas o banco guarda microssegundos: a resposta da criação mostrava
+  `…15.263094069` e as consultas seguintes, `…15.263094`. Nenhum teste comparava os dois valores; a
+  diferença apareceu lendo as respostas da demo.
 
 ---
 

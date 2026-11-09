@@ -125,6 +125,38 @@ class EstoqueServiceIntegrationTest {
     }
 
     @Test
+    void dataDeCriacaoDevolvidaNaCriacaoEIgualAGravada() {
+        String sku = criarProduto(NOME, 10).getSku();
+        Reserva criada = service.reservar(sku, "PED-DATA", 1);
+        Bloqueio bloqueio = service.bloquear(sku, "PED-DATA", null, 1);
+
+        // Antes, a criação devolvia nanossegundos que o banco descarta: a mesma reserva tinha duas datas.
+        assertThat(criada.getDataCriacao().getNano() % 1_000).isZero();
+        assertThat(service.consultarReserva(criada.getId()).getDataCriacao()).isEqualTo(criada.getDataCriacao());
+        assertThat(service.consultarBloqueio(bloqueio.getId()).getDataCriacao()).isEqualTo(bloqueio.getDataCriacao());
+    }
+
+    @Test
+    void reservasDoPedidoTemOMesmoInstanteEOrdemDeterministicaPorSku() {
+        List<String> skus = new ArrayList<>(List.of(
+                criarProduto("Produto 1", 5).getSku(),
+                criarProduto("Produto 2", 5).getSku(),
+                criarProduto("Produto 3", 5).getSku()));
+        List<String> emOrdem = skus.stream().sorted().toList();
+
+        // Itens enviados na ordem inversa (alvo Java 17: sem List.reversed()).
+        List<Reserva> reservas = service.reservarPedido("PED-ORDEM", skus.stream()
+                .sorted(java.util.Comparator.reverseOrder()).map(sku -> new ItemReserva(sku, 1)).toList());
+
+        assertThat(reservas).extracting(r -> r.getProduto().getSku()).containsExactlyElementsOf(emOrdem);
+        assertThat(reservas).extracting(Reserva::getDataCriacao).containsOnly(reservas.get(0).getDataCriacao());
+        for (int i = 0; i < 3; i++) {
+            assertThat(service.listarReservasDoPedido("PED-ORDEM", null))
+                    .extracting(r -> r.getProduto().getSku()).containsExactlyElementsOf(emOrdem);
+        }
+    }
+
+    @Test
     void consultasDeReservaEBloqueioJaTrazemOProdutoParaUsoForaDaTransacao() {
         String sku = criarProduto(NOME, 10).getSku();
         UUID reservaId = service.reservar(sku, "PED-LAZY", 2).getId();

@@ -154,6 +154,18 @@ class ProdutoTest {
                 .isInstanceOf(RegraNegocioException.class);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Tec\u0000lado", "Teclado\nmecânico", "Tec\tlado", "Teclado\u007F"})
+    void nomeComCaractereDeControleERejeitado(String nome) {
+        assertThatThrownBy(() -> Produto.novo("SKU-1", nome, null, 10))
+                .isInstanceOf(RegraNegocioException.class)
+                .hasMessageContaining("nome")
+                .hasMessageContaining("caracteres de controle");
+        assertThatThrownBy(() -> Produto.novo("SKU-1", NOME, nome, 10))
+                .isInstanceOf(RegraNegocioException.class)
+                .hasMessageContaining("marca");
+    }
+
     @Test
     void normalizacaoDoSkuIgualaMaiusculasEMinusculas() {
         assertThat(Produto.normalizarSku(" tec-01 ")).isEqualTo(Produto.normalizarSku("TEC-01")).isEqualTo("TEC-01");

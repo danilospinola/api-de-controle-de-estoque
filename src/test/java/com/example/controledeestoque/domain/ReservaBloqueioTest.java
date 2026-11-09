@@ -111,6 +111,19 @@ class ReservaBloqueioTest {
         }
 
         @Test
+        void pedidoIdComCaractereDeControleERejeitadoSemAlterarSaldo() {
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
+
+            assertThatThrownBy(() -> Reserva.criar(produto, "PED-1\nFALSO", 3, AGORA))
+                    .isInstanceOf(RegraNegocioException.class)
+                    .hasMessageContaining("pedidoId");
+            assertThatThrownBy(() -> Bloqueio.criar(produto, "PED-2", "ava\u0000ria", 3, AGORA))
+                    .isInstanceOf(RegraNegocioException.class)
+                    .hasMessageContaining("motivo");
+            assertSaldo(produto, 10, 10, 0, 0);
+        }
+
+        @Test
         void reservaEfetivadaNaoPodeSerLiberada() {
             Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Reserva reserva = Reserva.criar(produto, "PED-1", 3, AGORA);

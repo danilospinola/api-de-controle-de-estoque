@@ -18,13 +18,17 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * Casos de uso do estoque. As regras ficam nas entidades de domínio; este serviço
@@ -109,19 +113,27 @@ public class EstoqueService {
      * Reserva vários produtos para o mesmo pedido, tudo ou nada: se um item falhar (produto
      * inexistente, estoque insuficiente), a transação inteira é desfeita e nenhum saldo muda.
      * <p>
-     * Os itens são processados em ordem fixa de SKU e o Hibernate ordena os UPDATEs pela chave
-     * primária ({@code order_updates}), para que duas reservas concorrentes travem as linhas dos
-     * produtos sempre na mesma ordem e não entrem em deadlock no PostgreSQL.
+     * Os produtos são carregados numa única consulta e os itens processados em ordem fixa de SKU (a
+     * mesma das listagens do pedido). Quem evita deadlock é o Hibernate, que ordena os UPDATEs pela
+     * chave primária ({@code order_updates}): duas reservas concorrentes travam as linhas dos produtos
+     * sempre na mesma ordem. Todas as reservas do pedido recebem o mesmo instante de criação.
      */
     public List<Reserva> reservarPedido(String pedidoId, List<ItemReserva> itens) {
         List<ItemReserva> emOrdem = normalizarItens(itens).stream()
                 .sorted(Comparator.comparing(ItemReserva::sku))
                 .toList();
+        List<String> skus = emOrdem.stream().map(ItemReserva::sku).toList();
         return executor.executar(() -> {
+            Map<String, Produto> produtos = produtoRepository.findBySkuIn(skus).stream()
+                    .collect(Collectors.toMap(Produto::getSku, Function.identity()));
+            LocalDateTime criacao = agora();
             List<Reserva> reservas = new ArrayList<>();
             for (ItemReserva item : emOrdem) {
-                Produto produto = buscarProduto(item.sku());
-                reservas.add(Reserva.criar(produto, pedidoId, item.quantidade(), agora()));
+                Produto produto = produtos.get(item.sku());
+                if (produto == null) {
+                    throw produtoNaoEncontrado(item.sku());
+                }
+                reservas.add(Reserva.criar(produto, pedidoId, item.quantidade(), criacao));
             }
             return reservaRepository.saveAllAndFlush(reservas);
         });
@@ -130,8 +142,8 @@ public class EstoqueService {
     @Transactional(readOnly = true)
     public List<Reserva> listarReservasDoPedido(String pedidoId, StatusReserva status) {
         return status == null
-                ? reservaRepository.findByPedidoIdOrderByDataCriacaoAsc(pedidoId)
-                : reservaRepository.findByPedidoIdAndStatusOrderByDataCriacaoAsc(pedidoId, status);
+                ? reservaRepository.findByPedidoIdOrderByDataCriacaoAscProdutoSkuAscIdAsc(pedidoId)
+                : reservaRepository.findByPedidoIdAndStatusOrderByDataCriacaoAscProdutoSkuAscIdAsc(pedidoId, status);
     }
 
     public Reserva liberarReserva(UUID reservaId) {
@@ -159,8 +171,8 @@ public class EstoqueService {
     public List<Reserva> listarReservas(String sku, StatusReserva status) {
         UUID produtoId = buscarProduto(sku).getId();
         return status == null
-                ? reservaRepository.findByProdutoIdOrderByDataCriacaoAsc(produtoId)
-                : reservaRepository.findByProdutoIdAndStatusOrderByDataCriacaoAsc(produtoId, status);
+                ? reservaRepository.findByProdutoIdOrderByDataCriacaoAscIdAsc(produtoId)
+                : reservaRepository.findByProdutoIdAndStatusOrderByDataCriacaoAscIdAsc(produtoId, status);
     }
 
     // ---------- Bloqueio ----------
@@ -190,8 +202,8 @@ public class EstoqueService {
     public List<Bloqueio> listarBloqueios(String sku, StatusBloqueio status) {
         UUID produtoId = buscarProduto(sku).getId();
         return status == null
-                ? bloqueioRepository.findByProdutoIdOrderByDataCriacaoAsc(produtoId)
-                : bloqueioRepository.findByProdutoIdAndStatusOrderByDataCriacaoAsc(produtoId, status);
+                ? bloqueioRepository.findByProdutoIdOrderByDataCriacaoAscIdAsc(produtoId)
+                : bloqueioRepository.findByProdutoIdAndStatusOrderByDataCriacaoAscIdAsc(produtoId, status);
     }
 
     // ---------- auxiliares ----------
@@ -199,9 +211,11 @@ public class EstoqueService {
     /** Busca pelo SKU na forma canônica (maiúsculas), usando o índice da constraint única. */
     private Produto buscarProduto(String sku) {
         String normalizado = Produto.normalizarSku(sku);
-        return produtoRepository.findBySku(normalizado)
-                .orElseThrow(() -> new RecursoNaoEncontradoException(
-                        "Produto com sku %s não existe.".formatted(normalizado)));
+        return produtoRepository.findBySku(normalizado).orElseThrow(() -> produtoNaoEncontrado(normalizado));
+    }
+
+    private static RecursoNaoEncontradoException produtoNaoEncontrado(String sku) {
+        return new RecursoNaoEncontradoException("Produto com sku %s não existe.".formatted(sku));
     }
 
     private Reserva buscarReserva(UUID id) {
@@ -244,7 +258,12 @@ public class EstoqueService {
         return normalizados;
     }
 
+    /**
+     * Instante atual na precisão da coluna (microssegundos no PostgreSQL e no H2). Sem o corte, a
+     * resposta da criação mostrava nanossegundos que o banco descarta, e a mesma reserva aparecia com
+     * duas datas diferentes: uma na criação e outra nas consultas seguintes.
+     */
     private LocalDateTime agora() {
-        return LocalDateTime.now(clock);
+        return LocalDateTime.now(clock).truncatedTo(ChronoUnit.MICROS);
     }
 }

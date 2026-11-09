@@ -24,14 +24,23 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.validation.method.ParameterErrors;
+import org.springframework.validation.method.ParameterValidationResult;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+import tools.jackson.core.exc.StreamConstraintsException;
+import tools.jackson.core.exc.StreamReadException;
 import tools.jackson.databind.DatabindException;
 import tools.jackson.databind.exc.MismatchedInputException;
+import tools.jackson.databind.exc.UnrecognizedPropertyException;
 
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -48,6 +57,8 @@ import java.util.stream.Collectors;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+    private static final Pattern ENTRE_ASPAS = Pattern.compile("\"([^\"]+)\"");
 
     private static final Map<Integer, String> TITULOS = Map.of(
             400, "Requisição inválida",
@@ -111,11 +122,48 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                                                                   HttpHeaders headers,
                                                                   HttpStatusCode status,
                                                                   WebRequest request) {
-        Map<String, String> erros = ex.getBindingResult().getFieldErrors().stream()
-                .collect(Collectors.toMap(
-                        erro -> erro.getField(),
-                        erro -> String.valueOf(erro.getDefaultMessage()),
-                        (primeiro, segundo) -> primeiro));
+        Map<String, String> erros = new LinkedHashMap<>();
+        ex.getBindingResult().getFieldErrors()
+                .forEach(erro -> erros.putIfAbsent(erro.getField(), String.valueOf(erro.getDefaultMessage())));
+        return requisicaoInvalida(erros);
+    }
+
+    /**
+     * Validação de parâmetros do método (ex.: {@code pedidoId} no endereço). Quando um parâmetro tem
+     * restrições, o Spring valida o método inteiro e os erros do corpo também chegam aqui; as chaves
+     * do mapa {@code erros} são as mesmas da validação do corpo ({@code itens[0].sku}, {@code pedidoId}).
+     */
+    @Override
+    protected ResponseEntity<Object> handleHandlerMethodValidationException(HandlerMethodValidationException ex,
+                                                                            HttpHeaders headers,
+                                                                            HttpStatusCode status,
+                                                                            WebRequest request) {
+        Map<String, String> erros = new LinkedHashMap<>();
+        for (ParameterValidationResult resultado : ex.getParameterValidationResults()) {
+            if (resultado instanceof ParameterErrors errosDoObjeto) {
+                errosDoObjeto.getFieldErrors()
+                        .forEach(erro -> erros.putIfAbsent(erro.getField(), String.valueOf(erro.getDefaultMessage())));
+            } else {
+                String parametro = resultado.getMethodParameter().getParameterName();
+                resultado.getResolvableErrors()
+                        .forEach(erro -> erros.putIfAbsent(parametro, String.valueOf(erro.getDefaultMessage())));
+            }
+        }
+        return requisicaoInvalida(erros);
+    }
+
+    /** Corpo acima do limite de tamanho ({@code max-document-length}) responde 413; os demais, 400. */
+    @Override
+    protected ResponseEntity<Object> handleHttpMessageNotReadable(HttpMessageNotReadableException ex,
+                                                                  HttpHeaders headers,
+                                                                  HttpStatusCode status,
+                                                                  WebRequest request) {
+        HttpStatusCode codigo = ex.getCause() instanceof StreamConstraintsException
+                ? HttpStatus.CONTENT_TOO_LARGE : status;
+        return handleExceptionInternal(ex, null, headers, codigo, request);
+    }
+
+    private static ResponseEntity<Object> requisicaoInvalida(Map<String, String> erros) {
         ProblemDetail problema = problema(HttpStatus.BAD_REQUEST, "Requisição inválida",
                 "Um ou mais campos são inválidos.");
         problema.setProperty("erros", erros);
@@ -161,17 +209,51 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return problema;
     }
 
-    /** Erro de leitura do corpo: aponta o campo quando o JSON é válido mas um valor não serve. */
+    /**
+     * Erro de leitura do corpo, do mais específico ao mais genérico: corpo grande demais, campo
+     * desconhecido, campo repetido, valor de tipo errado, corpo que não é um objeto e, por fim, JSON
+     * ausente ou malformado.
+     */
     private static String detalheCorpoInvalido(HttpMessageNotReadableException ex) {
-        if (ex.getCause() instanceof DatabindException erro && !erro.getPath().isEmpty()) {
-            String campo = erro.getPath().stream()
-                    .map(ref -> ref.getPropertyName() != null ? ref.getPropertyName() : "[" + ref.getIndex() + "]")
-                    .collect(Collectors.joining("."));
+        Throwable causa = ex.getCause();
+        if (causa instanceof StreamConstraintsException) {
+            return "O corpo da requisição excede o tamanho máximo permitido.";
+        }
+        if (causa instanceof UnrecognizedPropertyException erro) {
+            String aceitos = erro.getKnownPropertyIds() == null ? ""
+                    : " Campos aceitos: " + erro.getKnownPropertyIds().stream().map(String::valueOf).sorted()
+                    .collect(Collectors.joining(", ")) + ".";
+            return "O campo '%s' não existe nesta operação.%s".formatted(caminho(erro), aceitos);
+        }
+        if (causa instanceof StreamReadException erro && erro.getOriginalMessage() != null
+                && erro.getOriginalMessage().startsWith("Duplicate")) {
+            Matcher nome = ENTRE_ASPAS.matcher(erro.getOriginalMessage());
+            return nome.find()
+                    ? "O campo '%s' aparece mais de uma vez no corpo da requisição.".formatted(nome.group(1))
+                    : "O corpo da requisição tem um campo repetido.";
+        }
+        if (causa instanceof DatabindException erro) {
+            if (erro.getPath().isEmpty()) {
+                return "O corpo da requisição deve ser um objeto JSON com os campos da operação.";
+            }
             String esperado = erro instanceof MismatchedInputException m && m.getTargetType() != null
                     ? " " + esperado(m.getTargetType()) : "";
-            return "O campo '%s' recebeu um valor em formato inválido.%s".formatted(campo, esperado);
+            return "O campo '%s' recebeu um valor em formato inválido.%s".formatted(caminho(erro), esperado);
         }
         return "O corpo da requisição está ausente ou não é um JSON válido em UTF-8.";
+    }
+
+    /** Caminho do campo no formato da validação do corpo: {@code itens[0].quantidade}. */
+    private static String caminho(DatabindException erro) {
+        StringBuilder caminho = new StringBuilder();
+        erro.getPath().forEach(ref -> {
+            if (ref.getPropertyName() != null) {
+                caminho.append(caminho.isEmpty() ? "" : ".").append(ref.getPropertyName());
+            } else {
+                caminho.append('[').append(ref.getIndex()).append(']');
+            }
+        });
+        return caminho.toString();
     }
 
     private static String esperado(Class<?> tipo) {

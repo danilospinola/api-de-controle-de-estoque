@@ -20,13 +20,16 @@ import java.util.List;
  * <p>
  * As mensagens são explícitas e em português: sem isso, o Bean Validation usa o idioma do servidor
  * (em inglês na EC2, por exemplo) e a mesma requisição teria respostas diferentes em cada ambiente.
+ * <p>
+ * O JSON é lido em modo estrito (ver {@code application.yaml}): campo desconhecido, número decimal ou
+ * texto em campo inteiro e chave repetida respondem 400 antes de chegar aqui.
  */
 public final class Requests {
 
-    private static final String OBRIGATORIO = "é obrigatório";
-    private static final String OBRIGATORIA = "é obrigatória";
-    private static final String TAMANHO_MAXIMO = "deve ter no máximo {max} caracteres";
-    private static final String MAIOR_QUE_ZERO = "deve ser maior que zero";
+    public static final String OBRIGATORIO = "é obrigatório";
+    public static final String OBRIGATORIA = "é obrigatória";
+    public static final String TAMANHO_MAXIMO = "deve ter no máximo {max} caracteres";
+    public static final String MAIOR_QUE_ZERO = "deve ser maior que zero";
 
     private Requests() {
     }
@@ -41,9 +44,11 @@ public final class Requests {
             String sku,
             @Schema(example = "Teclado mecânico ABNT2", description = "Nome do produto (obrigatório, até 150 caracteres)")
             @NotBlank(message = OBRIGATORIO)
-            @Size(max = Produto.TAMANHO_MAXIMO_NOME, message = TAMANHO_MAXIMO) String nome,
+            @Size(max = Produto.TAMANHO_MAXIMO_NOME, message = TAMANHO_MAXIMO)
+            @SemCaracteresDeControle String nome,
             @Schema(example = "Logitech", description = "Marca (opcional, até 100 caracteres)")
-            @Size(max = Produto.TAMANHO_MAXIMO_MARCA, message = TAMANHO_MAXIMO) String marca,
+            @Size(max = Produto.TAMANHO_MAXIMO_MARCA, message = TAMANHO_MAXIMO)
+            @SemCaracteresDeControle String marca,
             @Schema(example = "100", description = "Saldo inicial disponível (opcional, padrão 0)")
             @PositiveOrZero(message = "não pode ser negativa") Integer quantidadeInicial) {
 
@@ -60,7 +65,8 @@ public final class Requests {
     public record CriarReservaRequest(
             @Schema(example = "PED-2026-0001")
             @NotBlank(message = OBRIGATORIO)
-            @Size(max = Reserva.TAMANHO_MAXIMO_PEDIDO, message = TAMANHO_MAXIMO) String pedidoId,
+            @Size(max = Reserva.TAMANHO_MAXIMO_PEDIDO, message = TAMANHO_MAXIMO)
+            @SemCaracteresDeControle String pedidoId,
             @Schema(example = "5")
             @NotNull(message = OBRIGATORIA) @Positive(message = MAIOR_QUE_ZERO) Integer quantidade) {
     }
@@ -86,9 +92,11 @@ public final class Requests {
     public record CriarBloqueioRequest(
             @Schema(example = "PED-2026-0001")
             @NotBlank(message = OBRIGATORIO)
-            @Size(max = Reserva.TAMANHO_MAXIMO_PEDIDO, message = TAMANHO_MAXIMO) String pedidoId,
+            @Size(max = Reserva.TAMANHO_MAXIMO_PEDIDO, message = TAMANHO_MAXIMO)
+            @SemCaracteresDeControle String pedidoId,
             @Schema(example = "Avaria identificada na conferência", description = "Opcional")
-            @Size(max = Bloqueio.TAMANHO_MAXIMO_MOTIVO, message = TAMANHO_MAXIMO) String motivo,
+            @Size(max = Bloqueio.TAMANHO_MAXIMO_MOTIVO, message = TAMANHO_MAXIMO)
+            @SemCaracteresDeControle String motivo,
             @Schema(example = "2")
             @NotNull(message = OBRIGATORIA) @Positive(message = MAIOR_QUE_ZERO) Integer quantidade) {
     }

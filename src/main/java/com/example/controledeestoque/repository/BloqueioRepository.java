@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Consultas já trazem o produto junto, pelo mesmo motivo de {@link ReservaRepository}. */
+/** Consultas já trazem o produto junto e em ordem determinística, como em {@link ReservaRepository}. */
 public interface BloqueioRepository extends JpaRepository<Bloqueio, UUID> {
 
     @Override
@@ -17,8 +17,8 @@ public interface BloqueioRepository extends JpaRepository<Bloqueio, UUID> {
     Optional<Bloqueio> findById(UUID id);
 
     @EntityGraph(attributePaths = "produto")
-    List<Bloqueio> findByProdutoIdOrderByDataCriacaoAsc(UUID produtoId);
+    List<Bloqueio> findByProdutoIdOrderByDataCriacaoAscIdAsc(UUID produtoId);
 
     @EntityGraph(attributePaths = "produto")
-    List<Bloqueio> findByProdutoIdAndStatusOrderByDataCriacaoAsc(UUID produtoId, StatusBloqueio status);
+    List<Bloqueio> findByProdutoIdAndStatusOrderByDataCriacaoAscIdAsc(UUID produtoId, StatusBloqueio status);
 }

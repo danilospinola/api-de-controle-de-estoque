@@ -349,6 +349,100 @@ class EstoqueApiTest {
                 .andExpect(status().isNotFound());
     }
 
+    @Test
+    void jsonEstritoRecusaDecimalTextoECampoRepetidoSemAlterarOSaldo() throws Exception {
+        String sku = criarProduto(10);
+        String entradas = "/api/produtos/" + sku + "/entradas";
+
+        // Antes da correção, 2.7 virava 2, 1e1 virava 10 e "3" virava 3, todos com 200.
+        for (String quantidade : new String[]{"2.7", "2.0", "1e1", "\"3\""}) {
+            postJson(entradas, "{\"quantidade\": " + quantidade + "}")
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail", containsString("'quantidade'")))
+                    .andExpect(jsonPath("$.detail", containsString("número inteiro")));
+        }
+        postJson("/api/produtos/" + sku + "/saidas", "{\"quantidade\": 1, \"quantidade\": 9}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value("O campo 'quantidade' aparece mais de uma vez no corpo da requisição."));
+        postJson(entradas, "[1]")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail", containsString("objeto JSON")));
+        postJson(entradas, "{\"quantidade\": 1} {\"quantidade\": 2}")
+                .andExpect(status().isBadRequest());
+
+        mvc.perform(get("/api/produtos/{sku}", sku))
+                .andExpect(jsonPath("$.quantidadeTotal").value(10))
+                .andExpect(jsonPath("$.version").value(0));
+    }
+
+    @Test
+    void campoDesconhecidoRespondeComOsCamposAceitosENaoCadastra() throws Exception {
+        String sku = skuUnico();
+
+        // Erro de digitação em campo opcional: antes, o produto era criado com 0 unidades.
+        postJson("/api/produtos", "{\"sku\": \"" + sku + "\", \"nome\": \"Teclado\", \"quantidadeIncial\": 100}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value("O campo 'quantidadeIncial' não existe nesta operação. "
+                        + "Campos aceitos: marca, nome, quantidadeInicial, sku."));
+        mvc.perform(get("/api/produtos/{sku}", sku)).andExpect(status().isNotFound());
+
+        postJson("/api/pedidos/PED-API-3/reservas", "{\"itens\": [{\"skuu\": \"" + sku + "\", \"quantidade\": 1}]}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail", containsString("'itens[0].skuu' não existe")));
+    }
+
+    @Test
+    void caracteresDeControleSaoRecusadosComErroPorCampo() throws Exception {
+        String sku = criarProduto(10);
+
+        postJson("/api/produtos", "{\"sku\": \"" + skuUnico() + "\", \"nome\": \"Tec\\u0000lado\", \"marca\": \"Logi\\ntech\"}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.erros.nome", containsString("caracteres de controle")))
+                .andExpect(jsonPath("$.erros.marca", containsString("caracteres de controle")));
+        postJson("/api/produtos/" + sku + "/reservas", "{\"pedidoId\": \"PED-1\\nFALSO\", \"quantidade\": 1}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.erros.pedidoId", containsString("quebra de linha")));
+        postJson("/api/produtos/" + sku + "/bloqueios", "{\"pedidoId\": \"PED-2\", \"motivo\": \"ava\\tria\", \"quantidade\": 1}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.erros.motivo", containsString("caracteres de controle")));
+
+        // Espaços e tabulação nas pontas continuam aceitos: o domínio os remove.
+        postJson("/api/produtos", "{\"sku\": \"" + skuUnico() + "\", \"nome\": \"  Teclado\\t\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.nome").value("Teclado"));
+        mvc.perform(get("/api/produtos/{sku}", sku))
+                .andExpect(jsonPath("$.quantidadeDisponivel").value(10));
+    }
+
+    @Test
+    void pedidoIdDoEnderecoEValidadoComoNoCorpo() throws Exception {
+        String sku = criarProduto(5);
+        String item = "{\"itens\": [{\"sku\": \"" + sku + "\", \"quantidade\": 1}]}";
+        String longo = "P".repeat(101);
+
+        postJson("/api/pedidos/" + longo + "/reservas", item)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.title").value("Requisição inválida"))
+                .andExpect(jsonPath("$.erros.pedidoId").value("deve ter no máximo 100 caracteres"));
+        mvc.perform(post("/api/pedidos/{pedidoId}/reservas", "PED\nFALSO")
+                        .contentType(MediaType.APPLICATION_JSON).content(item))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.erros.pedidoId", containsString("caracteres de controle")));
+        mvc.perform(get("/api/pedidos/{pedidoId}/reservas", longo))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.erros.pedidoId").exists());
+        mvc.perform(get("/api/produtos/{sku}", sku))
+                .andExpect(jsonPath("$.quantidadeReservada").value(0));
+    }
+
+    @Test
+    void corpoAcimaDoLimiteResponde413() throws Exception {
+        postJson("/api/produtos", "{\"sku\": \"" + skuUnico() + "\", \"nome\": \"" + "x".repeat(100_000) + "\"}")
+                .andExpect(status().isContentTooLarge())
+                .andExpect(jsonPath("$.title").value("Requisição grande demais"))
+                .andExpect(jsonPath("$.detail", containsString("tamanho máximo")));
+    }
+
     /** Cadastra um produto com SKU único e devolve esse SKU, que identifica o produto nas demais rotas. */
     private String criarProduto(int quantidadeInicial) throws Exception {
         String corpo = postJson("/api/produtos",
