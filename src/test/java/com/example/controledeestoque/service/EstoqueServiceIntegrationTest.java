@@ -7,6 +7,7 @@ import com.example.controledeestoque.domain.StatusReserva;
 import com.example.controledeestoque.exception.EstoqueInsuficienteException;
 import com.example.controledeestoque.exception.RecursoNaoEncontradoException;
 import com.example.controledeestoque.exception.RegraNegocioException;
+import com.example.controledeestoque.exception.SkuDuplicadoException;
 import com.example.controledeestoque.repository.ReservaRepository;
 import com.example.controledeestoque.service.EstoqueService.ItemReserva;
 import org.junit.jupiter.api.Test;
@@ -52,7 +53,7 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void fluxoCompletoPersisteSaldosEStatus() {
-        UUID produtoId = service.criarProduto(NOME,20).getId();
+        UUID produtoId = criarProduto(NOME,20).getId();
 
         service.entrada(produtoId, 5);                                     // 25 disponível
         service.saida(produtoId, 3);                                       // 22 disponível
@@ -74,7 +75,7 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void operacaoInvalidaNaoPersisteNadaParcialmente() {
-        UUID produtoId = service.criarProduto(NOME,5).getId();
+        UUID produtoId = criarProduto(NOME,5).getId();
 
         assertThatThrownBy(() -> service.reservar(produtoId, "PED-1", 6))
                 .isInstanceOf(EstoqueInsuficienteException.class);
@@ -85,7 +86,7 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void liberarReservaDuasVezesERejeitado() {
-        UUID produtoId = service.criarProduto(NOME,5).getId();
+        UUID produtoId = criarProduto(NOME,5).getId();
         Reserva reserva = service.reservar(produtoId, "PED-1", 2);
         service.liberarReserva(reserva.getId());
 
@@ -107,7 +108,7 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void bancoRejeitaEstadoInconsistenteMesmoFuraDaAplicacao() {
-        UUID produtoId = service.criarProduto(NOME,5).getId();
+        UUID produtoId = criarProduto(NOME,5).getId();
 
         // Simula um bug/acesso direto que quebraria a invariante total = disp + res + bloq.
         assertThatThrownBy(() -> jdbcTemplate.update(
@@ -139,7 +140,7 @@ class EstoqueServiceIntegrationTest {
         int estoqueInicial = 50;
         int quantidadePorReserva = 5;
         int requisicoes = 20; // demanda de 100 unidades para 50 disponíveis
-        UUID produtoId = service.criarProduto(NOME,estoqueInicial).getId();
+        UUID produtoId = criarProduto(NOME,estoqueInicial).getId();
 
         List<Resultado> resultados = executarEmParalelo(requisicoes, i ->
                 () -> service.reservar(produtoId, "PED-" + i, quantidadePorReserva));
@@ -160,7 +161,7 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void liberacoesConcorrentesDaMesmaReservaDevolvemUnidadesUmaUnicaVez() throws Exception {
-        UUID produtoId = service.criarProduto(NOME,10).getId();
+        UUID produtoId = criarProduto(NOME,10).getId();
         UUID reservaId = service.reservar(produtoId, "PED-1", 4).getId();
 
         List<Resultado> resultados = executarEmParalelo(8, i -> () -> service.liberarReserva(reservaId));
@@ -172,7 +173,7 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void operacoesMistasConcorrentesPreservamAInvariante() throws Exception {
-        UUID produtoId = service.criarProduto(NOME,30).getId();
+        UUID produtoId = criarProduto(NOME,30).getId();
 
         List<Resultado> resultados = executarEmParalelo(30, i -> switch (i % 4) {
             case 0 -> () -> service.entrada(produtoId, 2);
@@ -231,8 +232,8 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void reservaDePedidoComVariosProdutosETudoOuNada() {
-        UUID teclado = service.criarProduto("Teclado", 5).getId();
-        UUID mouse = service.criarProduto("Mouse", 1).getId();
+        UUID teclado = criarProduto("Teclado", 5).getId();
+        UUID mouse = criarProduto("Mouse", 1).getId();
 
         assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-1",
                 List.of(new ItemReserva(teclado, 2), new ItemReserva(mouse, 3))))
@@ -253,7 +254,7 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void reservaDePedidoRejeitaItensInvalidosSemAlterarNada() {
-        UUID produto = service.criarProduto("Monitor", 5).getId();
+        UUID produto = criarProduto("Monitor", 5).getId();
 
         assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2", List.of()))
                 .isInstanceOf(RegraNegocioException.class);
@@ -271,8 +272,8 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void reservasDePedidoConcorrentesEmOrdensInvertidasNaoVendemAMaisNemTravam() throws Exception {
-        UUID a = service.criarProduto("Produto A", 5).getId();
-        UUID b = service.criarProduto("Produto B", 5).getId();
+        UUID a = criarProduto("Produto A", 5).getId();
+        UUID b = criarProduto("Produto B", 5).getId();
         int pedidos = 10;
         ExecutorService pool = Executors.newFixedThreadPool(pedidos);
         CountDownLatch largada = new CountDownLatch(1);
@@ -308,6 +309,69 @@ class EstoqueServiceIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void skuRepetidoEmQualquerCaixaResponde409ComOProdutoExistenteSemGravarNada() {
+        Produto original = service.criarProduto("int-sku-dup", "Teclado", "Logitech", 5);
+
+        assertThat(original.getSku()).isEqualTo("INT-SKU-DUP");
+        assertThatThrownBy(() -> service.criarProduto("  INT-sku-DUP ", "Outro nome", null, 1))
+                .isInstanceOf(SkuDuplicadoException.class)
+                .hasMessageContaining(original.getId().toString())
+                .extracting(e -> ((SkuDuplicadoException) e).getProdutoExistente()).isEqualTo(original.getId());
+        assertSaldo(service.consultarProdutoPorSku("int-sku-dup"), 5, 5, 0, 0);
+        assertThatThrownBy(() -> service.consultarProdutoPorSku("INT-SKU-INEXISTENTE"))
+                .isInstanceOf(RecursoNaoEncontradoException.class);
+    }
+
+    @Test
+    void cadastrosSimultaneosDoMesmoSkuDeixamSoUmVencer() throws Exception {
+        int tentativas = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(tentativas);
+        CountDownLatch largada = new CountDownLatch(1);
+        try {
+            List<Future<Boolean>> futuros = new ArrayList<>();
+            for (int i = 0; i < tentativas; i++) {
+                futuros.add(pool.submit(() -> {
+                    largada.await();
+                    try {
+                        service.criarProduto("INT-SKU-CONCORRENTE", "Mouse", null, 1);
+                        return true;
+                    } catch (SkuDuplicadoException e) {
+                        return false;
+                    }
+                }));
+            }
+            largada.countDown();
+            long vencedores = 0;
+            for (Future<Boolean> futuro : futuros) {
+                if (futuro.get(30, TimeUnit.SECONDS)) {
+                    vencedores++;
+                }
+            }
+            assertThat(vencedores).isEqualTo(1);
+            assertThat(service.consultarProdutoPorSku("INT-SKU-CONCORRENTE").getQuantidadeTotal()).isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void bancoRejeitaSkuForaDoFormatoEMarcaEmBranco() {
+        UUID produtoId = criarProduto("Webcam", 1).getId();
+
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET sku = 'minusculo' WHERE id = ?", produtoId))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET sku = NULL WHERE id = ?", produtoId))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET marca = '   ' WHERE id = ?", produtoId))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    /** Cada produto de teste recebe um SKU único: o banco é compartilhado entre os testes da classe. */
+    private Produto criarProduto(String nome, int quantidade) {
+        return service.criarProduto("IT-" + UUID.randomUUID().toString().substring(0, 13), nome, null, quantidade);
     }
 
     private static void assertSaldo(Produto produto, int total, int disponivel, int reservada, int bloqueada) {

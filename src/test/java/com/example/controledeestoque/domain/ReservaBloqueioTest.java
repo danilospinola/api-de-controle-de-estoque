@@ -24,7 +24,7 @@ class ReservaBloqueioTest {
 
         @Test
         void reservarMoveDoDisponivelParaReservado() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
 
             Reserva reserva = Reserva.criar(produto, "PED-1", 3, AGORA);
 
@@ -36,7 +36,7 @@ class ReservaBloqueioTest {
 
         @Test
         void reservaAcimaDoDisponivelERejeitadaSemAlterarSaldo() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Bloqueio.criar(produto, "PED-0", null, 8, AGORA);
 
             assertThatThrownBy(() -> Reserva.criar(produto, "PED-1", 3, AGORA))
@@ -46,7 +46,7 @@ class ReservaBloqueioTest {
 
         @Test
         void variasReservasSimultaneasDePedidosDiferentes() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
 
             Reserva.criar(produto, "PED-1", 3, AGORA);
             Reserva.criar(produto, "PED-2", 4, AGORA);
@@ -57,7 +57,7 @@ class ReservaBloqueioTest {
 
         @Test
         void liberarDevolveAoDisponivel() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Reserva reserva = Reserva.criar(produto, "PED-1", 3, AGORA);
 
             reserva.liberar();
@@ -68,7 +68,7 @@ class ReservaBloqueioTest {
 
         @Test
         void efetivarBaixaDoTotal() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Reserva reserva = Reserva.criar(produto, "PED-1", 3, AGORA);
 
             reserva.efetivar();
@@ -79,7 +79,7 @@ class ReservaBloqueioTest {
 
         @Test
         void reservaLiberadaNaoPodeSerLiberadaNemEfetivadaNovamente() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Reserva reserva = Reserva.criar(produto, "PED-1", 3, AGORA);
             reserva.liberar();
 
@@ -92,7 +92,7 @@ class ReservaBloqueioTest {
         @NullAndEmptySource
         @ValueSource(strings = {"   ", "\t"})
         void pedidoIdObrigatorioERejeitadoSemAlterarSaldo(String pedidoId) {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
 
             assertThatThrownBy(() -> Reserva.criar(produto, pedidoId, 3, AGORA))
                     .isInstanceOf(RegraNegocioException.class)
@@ -102,7 +102,7 @@ class ReservaBloqueioTest {
 
         @Test
         void pedidoIdEGravadoSemEspacosERespeitaOTamanhoMaximo() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
 
             assertThat(Reserva.criar(produto, "  PED-1 ", 1, AGORA).getPedidoId()).isEqualTo("PED-1");
             String longo = "P".repeat(Reserva.TAMANHO_MAXIMO_PEDIDO + 1);
@@ -112,7 +112,7 @@ class ReservaBloqueioTest {
 
         @Test
         void reservaEfetivadaNaoPodeSerLiberada() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Reserva reserva = Reserva.criar(produto, "PED-1", 3, AGORA);
             reserva.efetivar();
 
@@ -126,7 +126,7 @@ class ReservaBloqueioTest {
 
         @Test
         void bloquearMoveDoDisponivelParaBloqueado() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
 
             Bloqueio bloqueio = Bloqueio.criar(produto, "PED-1", "avaria", 4, AGORA);
 
@@ -137,7 +137,7 @@ class ReservaBloqueioTest {
 
         @Test
         void bloqueioAcimaDoDisponivelERejeitadoSemAlterarSaldo() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Reserva.criar(produto, "PED-0", 7, AGORA);
 
             assertThatThrownBy(() -> Bloqueio.criar(produto, "PED-1", null, 4, AGORA))
@@ -147,7 +147,7 @@ class ReservaBloqueioTest {
 
         @Test
         void liberarDevolveAoDisponivel() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Bloqueio bloqueio = Bloqueio.criar(produto, "PED-1", null, 4, AGORA);
 
             bloqueio.liberar();
@@ -158,7 +158,7 @@ class ReservaBloqueioTest {
 
         @Test
         void pedidoIdObrigatorioEMotivoOpcionalNormalizado() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
 
             assertThatThrownBy(() -> Bloqueio.criar(produto, " ", "avaria", 2, AGORA))
                     .isInstanceOf(RegraNegocioException.class);
@@ -178,7 +178,7 @@ class ReservaBloqueioTest {
 
         @Test
         void bloqueioLiberadoNaoPodeSerLiberadoNovamente() {
-            Produto produto = Produto.novo("Produto teste", 10);
+            Produto produto = Produto.novo("SKU-1", "Produto teste", null, 10);
             Bloqueio bloqueio = Bloqueio.criar(produto, "PED-1", null, 4, AGORA);
             bloqueio.liberar();
 

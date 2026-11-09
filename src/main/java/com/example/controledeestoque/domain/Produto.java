@@ -13,7 +13,9 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
+import java.util.Locale;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * Saldo de estoque de um produto.
@@ -29,8 +31,10 @@ import java.util.UUID;
  * {@link #version} implementa lock otimista: duas transações concorrentes que alterem
  * o mesmo produto não conseguem ambas gravar; a segunda recebe conflito de versão.
  * <p>
- * {@link #nome} é a identificação legível do produto: obrigatório, sem espaços nas pontas e
- * <b>não único</b> (produtos distintos podem compartilhar o nome). A identidade continua sendo o {@link #id}.
+ * {@link #sku} é a chave de negócio: obrigatório e <b>único</b>, gravado em maiúsculas, então
+ * "tec-01" e "TEC-01" são o mesmo produto. É ele que impede cadastrar o mesmo item duas vezes com
+ * saldos separados. {@link #nome} e {@link #marca} são descritivos e não únicos (marcas diferentes
+ * podem usar o mesmo nome). O {@link #id} continua sendo a identidade técnica usada nas rotas.
  */
 @Entity
 @Table(name = "produto")
@@ -38,14 +42,29 @@ import java.util.UUID;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Produto {
 
+    public static final int TAMANHO_MAXIMO_SKU = 50;
     public static final int TAMANHO_MAXIMO_NOME = 150;
+    public static final int TAMANHO_MAXIMO_MARCA = 100;
+
+    /**
+     * Formato aceito na entrada: letras sem acento, números e hífens entre eles (ex.: tec-logi-k120).
+     * Só ASCII, verificado antes de converter para maiúsculas.
+     */
+    public static final String FORMATO_SKU = "[A-Za-z0-9]+(-[A-Za-z0-9]+)*";
+    private static final Pattern PADRAO_SKU = Pattern.compile(FORMATO_SKU);
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    @Column(nullable = false, unique = true, length = TAMANHO_MAXIMO_SKU)
+    private String sku;
+
     @Column(nullable = false, length = TAMANHO_MAXIMO_NOME)
     private String nome;
+
+    @Column(length = TAMANHO_MAXIMO_MARCA)
+    private String marca;
 
     @Column(nullable = false)
     private Integer quantidadeTotal;
@@ -62,18 +81,40 @@ public class Produto {
     @Version
     private Long version;
 
-    public static Produto novo(String nome, int quantidadeInicial) {
+    /** Cria o produto validando tudo antes: SKU (obrigatório e no formato), nome (obrigatório) e marca (opcional). */
+    public static Produto novo(String sku, String nome, String marca, int quantidadeInicial) {
+        String skuNormalizado = validarSku(sku);
         String nomeNormalizado = Textos.obrigatorio(nome, "nome", TAMANHO_MAXIMO_NOME);
+        String marcaNormalizada = Textos.opcional(marca, "marca", TAMANHO_MAXIMO_MARCA);
         if (quantidadeInicial < 0) {
             throw new RegraNegocioException("A quantidade inicial não pode ser negativa");
         }
         Produto produto = new Produto();
+        produto.sku = skuNormalizado;
         produto.nome = nomeNormalizado;
+        produto.marca = marcaNormalizada;
         produto.quantidadeTotal = quantidadeInicial;
         produto.quantidadeDisponivel = quantidadeInicial;
         produto.quantidadeReservada = 0;
         produto.quantidadeBloqueada = 0;
         return produto;
+    }
+
+    /**
+     * Forma canônica do SKU (sem espaços nas pontas e em maiúsculas), usada para gravar e para buscar.
+     * Na busca não há validação de formato: um SKU fora do padrão simplesmente não é encontrado.
+     */
+    public static String normalizarSku(String sku) {
+        return sku == null ? null : sku.strip().toUpperCase(Locale.ROOT);
+    }
+
+    private static String validarSku(String sku) {
+        String informado = Textos.obrigatorio(sku, "sku", TAMANHO_MAXIMO_SKU);
+        if (!PADRAO_SKU.matcher(informado).matches()) {
+            throw new RegraNegocioException(
+                    "O campo sku aceita apenas letras sem acento, números e hífens entre eles (ex.: TEC-LOGI-K120)");
+        }
+        return normalizarSku(informado);
     }
 
     /** Entrada: novas unidades chegam ao estoque já disponíveis. */

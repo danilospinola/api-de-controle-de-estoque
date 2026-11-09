@@ -4,6 +4,7 @@ import com.example.controledeestoque.exception.ConflitoConcorrenciaException;
 import com.example.controledeestoque.exception.EstoqueInsuficienteException;
 import com.example.controledeestoque.exception.RecursoNaoEncontradoException;
 import com.example.controledeestoque.exception.RegraNegocioException;
+import com.example.controledeestoque.exception.SkuDuplicadoException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.TypeMismatchException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -17,6 +18,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
@@ -72,6 +74,15 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(RegraNegocioException.class)
     public ProblemDetail regraNegocio(RegraNegocioException e) {
         return problema(HttpStatus.UNPROCESSABLE_CONTENT, "Operação inválida", e.getMessage());
+    }
+
+    @ExceptionHandler(SkuDuplicadoException.class)
+    public ProblemDetail skuDuplicado(SkuDuplicadoException e) {
+        ProblemDetail problema = problema(HttpStatus.CONFLICT, "SKU já cadastrado", e.getMessage());
+        if (e.getProdutoExistente() != null) {
+            problema.setProperty("produtoExistente", e.getProdutoExistente());
+        }
+        return problema;
     }
 
     @ExceptionHandler(ConflitoConcorrenciaException.class)
@@ -134,6 +145,8 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             String nome = e instanceof MethodArgumentTypeMismatchException m ? m.getName() : e.getPropertyName();
             detalhe = "O parâmetro '%s' recebeu um valor inválido: '%s'. %s"
                     .formatted(nome, e.getValue(), esperado(e.getRequiredType()));
+        } else if (ex instanceof MissingServletRequestParameterException e) {
+            detalhe = "O parâmetro '%s' é obrigatório.".formatted(e.getParameterName());
         } else if (ex instanceof HttpRequestMethodNotSupportedException e) {
             Set<HttpMethod> aceitos = e.getSupportedHttpMethods();
             detalhe = "O método %s não é aceito neste endereço.%s".formatted(e.getMethod(),

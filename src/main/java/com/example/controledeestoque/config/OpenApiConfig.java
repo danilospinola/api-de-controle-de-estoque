@@ -21,6 +21,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.MethodParameter;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.method.HandlerMethod;
 
 import java.util.Arrays;
@@ -49,9 +50,11 @@ public class OpenApiConfig {
 
     private static final String PROBLEMA = "Problema";
     private static final String TIPO_PROBLEMA = "application/problem+json";
-    private static final Set<String> IDS_DE_RECURSO = Set.of("produtoId", "reservaId", "bloqueioId");
+    /** Parâmetros que identificam um recurso: se ele não existir, a operação responde 404. */
+    private static final Set<String> IDS_DE_RECURSO = Set.of("produtoId", "reservaId", "bloqueioId", "sku");
 
     private static final Map<String, String> DESCRICAO_PARAMETROS = Map.of(
+            "sku", "SKU do produto, por exemplo TEC-LOGI-K120 (maiúsculas e minúsculas são equivalentes)",
             "produtoId", "Identificador do produto (o `id` devolvido no cadastro)",
             "reservaId", "Identificador da reserva (o `id` devolvido ao reservar)",
             "bloqueioId", "Identificador do bloqueio (o `id` devolvido ao bloquear)",
@@ -60,10 +63,11 @@ public class OpenApiConfig {
 
     private static final String DESCRICAO = """
             Controle de estoque com saldos **total, disponível, reservado e bloqueado** por produto, sempre com \
-            `total = disponível + reservada + bloqueada`.
+            `total = disponível + reservada + bloqueada`. Cada produto tem um **SKU** único (ex.: `TEC-LOGI-K120`), \
+            então o mesmo item não pode ser cadastrado duas vezes.
 
             ### Como testar em 1 minuto
-            1. Na seção **Produtos**, use **Cadastrar produto**: clique em *Execute* e copie o `id` da resposta.
+            1. Na seção **Produtos**, use **Cadastrar produto** com um SKU novo: clique em *Execute* e copie o `id` da resposta.
             2. Na seção **Reservas**, use **Reservar um produto** (ou **Reservar vários produtos de um pedido**) com esse `id`.
             3. Volte a **Produtos** e use **Consultar saldo do produto** para ver o efeito no saldo.
             4. Em **Reservas**, use **Liberar reserva** ou **Efetivar reserva** com o `id` da reserva.
@@ -72,7 +76,8 @@ public class OpenApiConfig {
             - **200 Sucesso**: sempre com o recurso no corpo, inclusive nos cadastros (o `id` criado vem no corpo).
             - **400** requisição inválida: o corpo diz qual campo corrigir.
             - **404** recurso não encontrado.
-            - **409** conflito de concorrência: o estoque mudou ao mesmo tempo; repita a requisição.
+            - **409** SKU já cadastrado (a resposta traz o `produtoExistente`) ou conflito de concorrência (o estoque \
+            mudou ao mesmo tempo; repita a requisição).
             - **422** regra de negócio: estoque insuficiente ou mudança de status não permitida.
             - **500** erro inesperado: informe o `identificador` da resposta.
 
@@ -111,12 +116,18 @@ public class OpenApiConfig {
                 sucesso.setDescription("Sucesso");
             }
             boolean escrita = handlerMethod.hasMethodAnnotation(PostMapping.class);
-            boolean recursoIdentificado = parametrosDeCaminho(handlerMethod).stream().anyMatch(IDS_DE_RECURSO::contains);
-            boolean listaDeItens = parametrosDeCaminho(handlerMethod).contains("pedidoId") && escrita;
+            List<String> parametros = parametrosDeEntrada(handlerMethod);
+            boolean recursoIdentificado = parametros.stream().anyMatch(IDS_DE_RECURSO::contains);
+            boolean listaDeItens = parametros.contains("pedidoId") && escrita;
+            boolean cadastro = escrita && parametros.isEmpty();
 
             adicionar(respostas, "400", "Requisição inválida: campo ausente, tipo ou formato errado", exemplo400());
             if (recursoIdentificado || listaDeItens) {
                 adicionar(respostas, "404", "Recurso não encontrado", exemplo404());
+            }
+            if (cadastro) {
+                adicionar(respostas, "409", "SKU já cadastrado: use a entrada de estoque do produto existente",
+                        exemplo409Sku());
             }
             if (escrita && (recursoIdentificado || listaDeItens)) {
                 adicionar(respostas, "409", "Conflito de concorrência: repita a requisição", exemplo409());
@@ -136,9 +147,10 @@ public class OpenApiConfig {
         };
     }
 
-    private static List<String> parametrosDeCaminho(HandlerMethod handlerMethod) {
+    /** Nomes dos parâmetros de caminho e de consulta (o corpo não conta). */
+    private static List<String> parametrosDeEntrada(HandlerMethod handlerMethod) {
         return Arrays.stream(handlerMethod.getMethodParameters())
-                .filter(p -> p.hasParameterAnnotation(PathVariable.class))
+                .filter(p -> p.hasParameterAnnotation(PathVariable.class) || p.hasParameterAnnotation(RequestParam.class))
                 .map(MethodParameter::getParameterName)
                 .toList();
     }
@@ -167,7 +179,9 @@ public class OpenApiConfig {
                 .addProperty("detail", new StringSchema().description("O que aconteceu e, quando possível, como corrigir"))
                 .addProperty("instance", new StringSchema().description("Endereço chamado"))
                 .addProperty("erros", erros)
-                .addProperty("identificador", new StringSchema().description("Só no 500: código para localizar o erro no log"));
+                .addProperty("identificador", new StringSchema().description("Só no 500: código para localizar o erro no log"))
+                .addProperty("produtoExistente", new StringSchema().format("uuid")
+                        .description("Só no 409 de SKU já cadastrado: id do produto que já tem esse SKU"));
     }
 
     private static Map<String, Object> exemplo(int status, String titulo, String detalhe) {
@@ -191,6 +205,15 @@ public class OpenApiConfig {
 
     private static Map<String, Object> exemplo409() {
         return exemplo(409, "Conflito de concorrência", "O estoque foi alterado concorrentemente. Tente novamente.");
+    }
+
+    private static Map<String, Object> exemplo409Sku() {
+        Map<String, Object> exemplo = exemplo(409, "SKU já cadastrado",
+                "O SKU TEC-LOGI-K120 já está cadastrado no produto 3fa85f64-5717-4562-b3fc-2c963f66afa6. "
+                        + "Para acrescentar unidades, use a entrada de estoque desse produto.");
+        exemplo.put("instance", "/api/produtos");
+        exemplo.put("produtoExistente", "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        return exemplo;
     }
 
     private static Map<String, Object> exemplo422() {

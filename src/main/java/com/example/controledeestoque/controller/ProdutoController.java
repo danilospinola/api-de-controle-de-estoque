@@ -47,10 +47,13 @@ public class ProdutoController {
     private final EstoqueService estoqueService;
 
     @Operation(tags = TAG_PRODUTOS, summary = "Cadastrar produto",
-            description = "Cria o produto com um saldo inicial disponível (opcional, padrão 0). Guarde o `id` da resposta.")
+            description = "Cria o produto com um SKU único e um saldo inicial disponível (opcional, padrão 0). "
+                    + "Guarde o `id` da resposta. Um SKU já cadastrado responde 409 com o `produtoExistente`: "
+                    + "para acrescentar unidades a ele, use *Registrar entrada*.")
     @PostMapping
     public ProdutoResponse criar(@Valid @RequestBody CriarProdutoRequest request) {
-        return ProdutoResponse.de(estoqueService.criarProduto(request.nome(), request.quantidadeInicialOuZero()));
+        return ProdutoResponse.de(estoqueService.criarProduto(
+                request.sku(), request.nome(), request.marca(), request.quantidadeInicialOuZero()));
     }
 
     @Operation(tags = TAG_PRODUTOS, summary = "Consultar saldo do produto",
@@ -58,6 +61,13 @@ public class ProdutoController {
     @GetMapping("/{produtoId}")
     public ProdutoResponse consultar(@PathVariable UUID produtoId) {
         return ProdutoResponse.de(estoqueService.consultarProduto(produtoId));
+    }
+
+    @Operation(tags = TAG_PRODUTOS, summary = "Buscar produto por SKU",
+            description = "Consulta o saldo pelo código de negócio. Maiúsculas e minúsculas são equivalentes.")
+    @GetMapping("/busca")
+    public ProdutoResponse buscarPorSku(@RequestParam String sku) {
+        return ProdutoResponse.de(estoqueService.consultarProdutoPorSku(sku));
     }
 
     @Operation(tags = TAG_MOVIMENTACOES, summary = "Registrar entrada",

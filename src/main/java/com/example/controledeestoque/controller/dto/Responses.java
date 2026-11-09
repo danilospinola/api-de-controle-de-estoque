@@ -19,7 +19,9 @@ public final class Responses {
     @Schema(description = "Saldo do produto: total = disponível + reservada + bloqueada")
     public record ProdutoResponse(
             @Schema(description = "Identificador do produto, usado nas demais operações") UUID id,
+            @Schema(description = "Código único do produto (SKU), em maiúsculas", example = "TEC-LOGI-K120") String sku,
             @Schema(description = "Nome do produto") String nome,
+            @Schema(description = "Marca (pode ser nula)") String marca,
             @Schema(description = "Unidades em estoque (disponível + reservada + bloqueada)") int quantidadeTotal,
             @Schema(description = "Livres para saída, reserva ou bloqueio") int quantidadeDisponivel,
             @Schema(description = "Separadas para pedidos (reservas ATIVAS)") int quantidadeReservada,
@@ -30,7 +32,9 @@ public final class Responses {
         public static ProdutoResponse de(Produto produto) {
             return new ProdutoResponse(
                     produto.getId(),
+                    produto.getSku(),
                     produto.getNome(),
+                    produto.getMarca(),
                     produto.getQuantidadeTotal(),
                     produto.getQuantidadeDisponivel(),
                     produto.getQuantidadeReservada(),

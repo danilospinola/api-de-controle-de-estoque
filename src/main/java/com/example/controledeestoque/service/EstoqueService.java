@@ -7,10 +7,12 @@ import com.example.controledeestoque.domain.StatusBloqueio;
 import com.example.controledeestoque.domain.StatusReserva;
 import com.example.controledeestoque.exception.RecursoNaoEncontradoException;
 import com.example.controledeestoque.exception.RegraNegocioException;
+import com.example.controledeestoque.exception.SkuDuplicadoException;
 import com.example.controledeestoque.repository.BloqueioRepository;
 import com.example.controledeestoque.repository.ProdutoRepository;
 import com.example.controledeestoque.repository.ReservaRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 
@@ -42,14 +45,39 @@ public class EstoqueService {
 
     // ---------- Produto ----------
 
+    /**
+     * Cadastra o produto. Um SKU já existente responde {@link SkuDuplicadoException} (409) com o id do
+     * produto existente. Em dois cadastros simultâneos do mesmo SKU, os dois passam pela verificação
+     * prévia, mas a constraint única do banco deixa só um gravar: o outro recebe o mesmo 409.
+     */
     @Transactional
-    public Produto criarProduto(String nome, int quantidadeInicial) {
-        return produtoRepository.save(Produto.novo(nome, quantidadeInicial));
+    public Produto criarProduto(String sku, String nome, String marca, int quantidadeInicial) {
+        Produto novo = Produto.novo(sku, nome, marca, quantidadeInicial);
+        produtoRepository.findBySku(novo.getSku()).ifPresent(existente -> {
+            throw new SkuDuplicadoException(existente.getSku(), existente.getId());
+        });
+        try {
+            return produtoRepository.saveAndFlush(novo);
+        } catch (DataIntegrityViolationException e) {
+            if (violouSkuUnico(e)) {
+                throw new SkuDuplicadoException(novo.getSku(), null);
+            }
+            throw e;
+        }
     }
 
     @Transactional(readOnly = true)
     public Produto consultarProduto(UUID produtoId) {
         return buscarProduto(produtoId);
+    }
+
+    /** Busca pelo SKU; maiúsculas e minúsculas são equivalentes. */
+    @Transactional(readOnly = true)
+    public Produto consultarProdutoPorSku(String sku) {
+        String normalizado = Produto.normalizarSku(sku);
+        return produtoRepository.findBySku(normalizado)
+                .orElseThrow(() -> new RecursoNaoEncontradoException(
+                        "Produto com sku %s não existe.".formatted(normalizado)));
     }
 
     public Produto entrada(UUID produtoId, int quantidade) {
@@ -185,6 +213,12 @@ public class EstoqueService {
     private Bloqueio buscarBloqueio(UUID id) {
         return bloqueioRepository.findById(id)
                 .orElseThrow(() -> new RecursoNaoEncontradoException("Bloqueio", id));
+    }
+
+    /** A violação veio da constraint única do SKU (o nome aparece na mensagem do PostgreSQL e do H2)? */
+    private static boolean violouSkuUnico(DataIntegrityViolationException e) {
+        Throwable causa = e.getMostSpecificCause();
+        return causa.getMessage() != null && causa.getMessage().toLowerCase(Locale.ROOT).contains("uk_produto_sku");
     }
 
     private static void exigirItensValidos(List<ItemReserva> itens) {

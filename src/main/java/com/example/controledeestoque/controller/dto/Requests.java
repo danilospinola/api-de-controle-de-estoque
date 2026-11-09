@@ -8,6 +8,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
@@ -32,9 +33,18 @@ public final class Requests {
     }
 
     public record CriarProdutoRequest(
+            @Schema(example = "TEC-LOGI-K120", description = "Código único do produto (obrigatório, até 50 caracteres): "
+                    + "letras sem acento, números e hífens entre eles. Gravado em maiúsculas; tec-01 e TEC-01 são o mesmo SKU.")
+            @NotBlank(message = OBRIGATORIO)
+            @Size(max = Produto.TAMANHO_MAXIMO_SKU, message = TAMANHO_MAXIMO)
+            @Pattern(regexp = "\\s*" + Produto.FORMATO_SKU + "\\s*",
+                    message = "deve conter apenas letras sem acento, números e hífens entre eles (ex.: TEC-LOGI-K120)")
+            String sku,
             @Schema(example = "Teclado mecânico ABNT2", description = "Nome do produto (obrigatório, até 150 caracteres)")
             @NotBlank(message = OBRIGATORIO)
             @Size(max = Produto.TAMANHO_MAXIMO_NOME, message = TAMANHO_MAXIMO) String nome,
+            @Schema(example = "Logitech", description = "Marca (opcional, até 100 caracteres)")
+            @Size(max = Produto.TAMANHO_MAXIMO_MARCA, message = TAMANHO_MAXIMO) String marca,
             @Schema(example = "100", description = "Saldo inicial disponível (opcional, padrão 0)")
             @PositiveOrZero(message = "não pode ser negativa") Integer quantidadeInicial) {
 

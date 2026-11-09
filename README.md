@@ -21,7 +21,8 @@ quantidadeTotal = quantidadeDisponivel + quantidadeReservada + quantidadeBloquea
 
 | Funcionalidade | Endpoint | Efeito no saldo |
 |---|---|---|
-| Cadastrar produto (`nome` + quantidade inicial) | `POST /api/produtos` | total = disponível = quantidade inicial |
+| Cadastrar produto (`sku` único + `nome` + `marca` opcional + quantidade inicial) | `POST /api/produtos` | total = disponível = quantidade inicial |
+| Buscar produto por SKU | `GET /api/produtos/busca?sku=TEC-LOGI-K120` | — |
 | **Consultar** | `GET /api/produtos/{id}` | — |
 | **Entrada** | `POST /api/produtos/{id}/entradas` | total ↑, disponível ↑ |
 | **Saída** | `POST /api/produtos/{id}/saidas` | total ↓, disponível ↓ (só se houver disponível) |
@@ -73,7 +74,7 @@ src/main/java/com/example/controledeestoque
 └── config/            # Clock injetável e contrato OpenAPI (servidor relativo)
 src/main/resources
 ├── application.yaml                 # Perfil padrão (H2) e perfil "rds" (PostgreSQL)
-└── db/migration/V1__...sql          # Schema versionado (Flyway) com CHECK constraints
+└── db/migration/V1, V2, V3          # Schema versionado (Flyway): tabelas e CHECKs, pedido preenchido, SKU único
 infra
 ├── rds-postgresql.yaml              # CloudFormation: RDS PostgreSQL, security group, subnet e parameter group
 ├── app-ec2.yaml                     # CloudFormation: API publicada (EC2 t4g.micro + CloudFront + bucket do jar)
@@ -116,6 +117,7 @@ HTTP → ProdutoController (valida DTO)
 | **H2 (modo PostgreSQL) no perfil local/testes; PostgreSQL no perfil `rds`** | Executa e testa sem infraestrutura. A mesma migration roda nos dois bancos. | Testcontainers com PostgreSQL real (ver Limitações; não havia Docker no ambiente de desenvolvimento). |
 | **Erros RFC 9457 em português, com status semânticos** | 400 payload ou formato inválido (indicando o campo, o tipo ou os valores aceitos) · 404 inexistente · 405 método não permitido · 422 regra de negócio (estoque insuficiente, transição inválida) · 409 conflito de concorrência não resolvido · 500 erro inesperado (mensagem genérica com um identificador que também vai para o log, sem detalhes internos). As mensagens de validação são explícitas em português, então não dependem do idioma do servidor. O cliente diferencia "corrija o pedido" de "tente de novo". | 400 genérico para tudo; responder 200 também nos erros (descartado: clientes, monitoramento e health check passariam a tratar erro como sucesso). |
 | **Sucesso sempre 200, inclusive nos cadastros** | Decisão do projeto: toda resposta de sucesso usa o mesmo código e traz o recurso no corpo; o `id` do recurso criado vem no corpo. A mudança fica só na camada web (domínio, banco e infraestrutura não são afetados). | `201 Created` + `Location`, a convenção REST para criação. Ela distingue "criei agora" de "já existia", o que pesará quando houver idempotência e SKU (409). |
+| **SKU único como chave de negócio do produto** | Impede que o mesmo item exista em dois registros com saldos separados. O SKU é normalizado para maiúsculas, então a caixa não cria duplicatas. Um SKU repetido responde 409 com o `produtoExistente`; em cadastros simultâneos, a constraint única do banco decide quem vence e o outro recebe o mesmo 409. A busca fica em `/api/produtos/busca?sku=`, e não em `/sku/{sku}`, para não colidir com `/{produtoId}/reservas`. | Nome único (recusaria produtos diferentes com o mesmo nome); cadastro que soma unidades a um SKU existente (*upsert*), que misturaria cadastro com entrada de estoque sem o cliente perceber. |
 | **Reserva de pedido com vários produtos, tudo ou nada** | Um pedido real tem vários itens. Reservá-los um a um deixaria o pedido reservado pela metade quando um item falha. Todos os itens entram numa única transação: se um falhar, nada é reservado e a mensagem diz qual produto faltou. Os itens são processados em ordem de `produtoId` e o Hibernate ordena os UPDATEs (`order_updates`), então transações concorrentes travam as linhas sempre na mesma ordem e não entram em deadlock; o retry também cobre conflitos de lock. | Várias chamadas à rota por produto, com compensação pelo cliente (liberar o que já foi reservado), frágil e não atômica. |
 | **DTOs separados das entidades** | Contrato da API estável e independente do modelo de persistência; evita lazy loading na serialização (`open-in-view=false`). | Serializar entidades diretamente. |
 | **`Clock` injetável, UTC** | Datas determinísticas nos testes e independentes do fuso do servidor. | `LocalDateTime.now()` direto. |
@@ -139,13 +141,14 @@ HTTP → ProdutoController (valida DTO)
    `pedidoId`, `motivo`) são gravados sem espaços nas pontas e validados na API, no domínio e no banco.
 5. **Um produto pode ter várias reservas/bloqueios ativos**, inclusive do mesmo pedido.
 6. **Reserva e bloqueio são integrais**: liberação parcial não é suportada (libera-se a quantidade inteira).
-7. **O produto tem um `nome` obrigatório, mas não único.** Ele tem até 150 caracteres, é gravado sem
-   espaços nas pontas e é validado na API, no domínio e por uma CHECK constraint no banco. A identidade
-   continua sendo o UUID, porque produtos distintos podem ter o mesmo nome (ex.: variações de tamanho).
-   Um código de negócio único (SKU) e a edição do nome ficam para um módulo de catálogo.
-   **Consequência conhecida:** cadastrar "Teclado mecânico ABNT2" 5.000 vezes gera 5.000 registros, cada um
-   com UUID e saldo próprios, e o estoque do mesmo item fica dividido. O nome não pode ser a chave, porque
-   marcas e modelos diferentes podem ter o mesmo nome; a chave certa é o SKU (seção 7).
+7. **O produto é identificado pelo negócio por um SKU único.** O `sku` é obrigatório, tem até 50
+   caracteres e aceita letras sem acento, números e hífens entre eles (ex.: `TEC-LOGI-K120`). Ele é gravado
+   em maiúsculas, então `tec-logi-k120` e `TEC-LOGI-K120` são o mesmo produto. Cadastrar um SKU que já existe
+   responde **409** com o `produtoExistente`; novas unidades entram pela entrada de estoque. O `nome`
+   (obrigatório, até 150 caracteres) e a `marca` (opcional, até 100) são descritivos e não únicos, porque
+   marcas diferentes podem usar o mesmo nome. O UUID continua sendo a identidade técnica usada nas rotas.
+   As três regras são validadas na API, no domínio e no banco (constraint única e CHECKs da migration `V3`).
+   Os produtos que já existiam no RDS receberam um SKU provisório, `LEGADO-<id>`.
 8. Quantidades são inteiras e positivas, até 2.147.483.647 unidades por produto (limite de `Integer`). Uma
    entrada que ultrapassaria esse limite é rejeitada como regra de negócio (422), sem alterar o saldo.
 9. **A infraestrutura na AWS é temporária.** Ela existe só durante o processo seletivo e os dados gravados
@@ -170,9 +173,7 @@ HTTP → ProdutoController (valida DTO)
   isolamento e locking diferem em detalhes.
 - **Lock otimista sob altíssima disputa** num único produto pode esgotar as tentativas (resulta em 409).
 - **Sem autenticação/autorização** e sem paginação nas listagens.
-- Sem SKU (código único de negócio), sem edição do nome e sem exclusão de produto.
-- **Cadastro duplicado.** Nada impede cadastrar o mesmo produto várias vezes: cada `POST /api/produtos` cria
-  um UUID novo, e o saldo do mesmo item fica espalhado em vários registros.
+- Sem edição de SKU, nome ou marca e sem exclusão de produto.
 - **Sem log nem auditoria das operações.** O cadastro e as movimentações não geram linha de log, e o produto
   não tem data de criação. O access log do Tomcat e os logs de acesso do CloudFront estão desligados. Na AWS,
   o log da aplicação fica só no journal da EC2 (sem CloudWatch) e os logs do PostgreSQL não são exportados.
@@ -215,6 +216,12 @@ apenas durante o processo seletivo. Ele **não** é um ambiente de produção:
   compliance). Ver seção 7.
 - **Região única** (`us-east-2`, a Região selecionada do projeto AWS), sem recuperação de desastre em outra
   Região.
+- **Drift esperado na stack do banco.** A detecção de drift do CloudFormation acusa dois recursos, e nenhum é
+  alteração manual: (1) o security group tem uma regra a mais, criada pela stack da API para liberar a EC2;
+  (2) o parameter group aparece sem o `rds.force_ssl`, porque o valor 1 é o padrão do PostgreSQL 18 e o RDS
+  não o registra como parâmetro definido pelo usuário. O TLS obrigatório foi verificado na prática: uma
+  conexão sem criptografia é recusada pelo banco antes da autenticação. Ao atualizar a stack do banco (ex.:
+  trocar o `AllowedCidr`), vale conferir se a regra da API continua no security group.
 - **Custo contínuo enquanto existir**: cerca de US$ 18/mês (instância, disco gp3, IPv4 público e segredo).
   Esquecer a stack de pé consome os créditos. Ao remover a stack, nada fica para trás (ver o teardown na
   seção 6).
@@ -264,13 +271,13 @@ No Windows (PowerShell): `.\mvnw.cmd spring-boot:run`. A API sobe em `http://loc
 ./mvnw test
 ```
 
-66 testes em quatro níveis:
+84 testes em quatro níveis:
 
 | Classe | Tipo | O que garante |
 |---|---|---|
-| `ProdutoTest`, `ReservaBloqueioTest` | Unitário (domínio puro) | Regras de saldo, invariante, transições de status, rejeição sem efeito colateral |
+| `ProdutoTest`, `ReservaBloqueioTest` | Unitário (domínio puro) | Regras de saldo, invariante, transições de status, rejeição sem efeito colateral, formato e normalização do SKU |
 | `ExecutorTransacionalComRetryTest` | Unitário | Repete em conflito de versão, desiste após N tentativas, não repete erro de negócio |
-| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez; reserva de pedido com vários produtos tudo ou nada, inclusive pedidos concorrentes com os produtos em ordens invertidas, sem deadlock |
+| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez; reserva de pedido com vários produtos tudo ou nada, inclusive pedidos concorrentes com os produtos em ordens invertidas, sem deadlock; SKU único mesmo com 8 cadastros simultâneos do mesmo SKU (só um vence, os outros recebem 409) |
 | `EstoqueApiTest` | API (MockMvc) | Rotas, status HTTP (200/400/404/405/422), erros em português (`ProblemDetail`) indicando o que corrigir, contrato OpenAPI com servidor relativo |
 | `GlobalExceptionHandlerTest` | Unitário | Erro inesperado: 500 em português, com identificador e sem detalhes internos |
 
@@ -278,7 +285,9 @@ No Windows (PowerShell): `.\mvnw.cmd spring-boot:run`. A API sobe em `http://loc
 
 ```bash
 # cadastrar
-curl -X POST localhost:8080/api/produtos -H "Content-Type: application/json" -d '{"nome": "Teclado mecânico", "quantidadeInicial": 10}'
+curl -X POST localhost:8080/api/produtos -H "Content-Type: application/json" -d '{"sku": "TEC-LOGI-K120", "nome": "Teclado mecanico", "marca": "Logitech", "quantidadeInicial": 10}'
+# buscar pelo SKU
+curl "localhost:8080/api/produtos/busca?sku=tec-logi-k120"
 # reservar
 curl -X POST localhost:8080/api/produtos/{id}/reservas -H "Content-Type: application/json" -d '{"pedidoId":"PED-1","quantidade":4}'
 # consultar
@@ -434,7 +443,9 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
    *point-in-time restore* (os dois exigem o plano pago e estão fora do ambiente de avaliação); instância em subnet
    **privada**, sem endpoint público, com a aplicação na mesma VPC (ex.: ECS Fargate); chave KMS gerenciada
    pelo cliente; logs do PostgreSQL no CloudWatch (log groups com KMS) e alarmes de conexões, CPU, memória e
-   armazenamento; trilha do CloudTrail; classe de instância dimensionada por teste de carga, não
+   armazenamento; trilha do CloudTrail; regras do security group declaradas só como recursos separados
+   (`AWS::EC2::SecurityGroupIngress`), sem regras embutidas, para o drift detection ficar limpo e nenhuma
+   atualização depender de regras criadas por outra stack; classe de instância dimensionada por teste de carga, não
    *burstable*; e, se houver muitas instâncias da aplicação, RDS Proxy para pooling e failover mais rápido.
 8. **Observabilidade com Datadog** (ou o equivalente nativo da AWS):
    - **APM e tracing distribuído** com o agente Java do Datadog (`dd-java-agent`): cada requisição vira um
@@ -499,11 +510,9 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
     - logs centralizados: CloudWatch Agent ou agente do Datadog na EC2 enviando para um log group com
       retenção definida, logs de acesso do CloudFront no S3 e exportação dos logs do RDS;
     - access log do Tomcat (`server.tomcat.accesslog.enabled=true`) para registrar toda requisição.
-16. **Identificação do produto por SKU** (não implementado): `sku` obrigatório e único, com `marca` e `modelo`
-    como atributos. Um `POST /api/produtos` com SKU já existente responderia 409 informando o produto
-    existente (ou haveria um *upsert* em `PUT /api/produtos/{sku}`), e novas unidades entrariam por
-    `entradas`, nunca por um novo cadastro. O nome continua não único, porque marcas diferentes podem
-    usar o mesmo nome.
+16. **Catálogo de produtos** (o SKU único já foi implementado): edição de SKU, nome e marca com histórico;
+    atributos de variação (cor, tamanho, layout); código de barras (EAN/GTIN) como identificador
+    alternativo; e substituição dos SKUs provisórios `LEGADO-<id>` pelos códigos reais.
 17. **Qualidade da API** (pontos da revisão ainda não implementados): `GET /api/produtos` paginado com
     filtro por nome; Actuator com health check do banco (substituindo o health check improvisado da EC2);
     GitHub Actions rodando os testes a cada push; teste de API do 409. As mensagens em português, os erros
@@ -571,6 +580,13 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
     controller), adicionou o roteiro de teste e documentou automaticamente os erros de cada operação. Ao
     conferir o Swagger rodando, notou no log um aviso do springdoc causado pela própria definição e corrigiu
     antes de publicar.
+14. *"Se eu cadastrar um produto como Teclado mecânico ABNT2 5000 vezes ele sempre irá ter Id diferente?
+    [...] não faça muito sentido sendo que marcas variam"*, *"Posso criar um SKU para o projeto?"* e
+    *"Implemente o SKU com texto livre e com letras, atualize e valide a aplicação, o banco e a
+    infraestrutura, além do Swagger"*. A IA implementou o SKU em todas as camadas (domínio, migration `V3`
+    com SKU provisório para os produtos existentes, API, Swagger e testes, inclusive de cadastros
+    simultâneos), implantou na AWS e validou com drift detection, que encontrou dois desvios esperados,
+    investigados e documentados.
 
 ### Onde a IA mais ajudou
 - Gerar a estrutura completa (domínio, serviço, controllers, migration, testes) de forma consistente
@@ -631,6 +647,17 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
   chamadas independentes, sem atomicidade: se a terceira falhasse, o pedido ficava reservado pela metade e
   o cliente teria de desfazer as outras. A falha foi apontada por mim, não pela IA, depois de todas as
   revisões anteriores. A correção foi a rota `POST /api/pedidos/{pedidoId}/reservas`, tudo ou nada.
+- **A IA não modelou uma chave de negócio para o produto.** O modelo identificava o produto só pelo UUID, e
+  nada impedia cadastrar o mesmo item várias vezes: "Teclado mecânico ABNT2" cadastrado duas vezes virava
+  dois produtos, com o saldo dividido entre eles (uma reserva podia falhar por estoque insuficiente em um
+  registro enquanto o outro tinha unidades sobrando). A IA chegou a documentar o SKU como algo "para um
+  módulo de catálogo", tratando como detalhe de cadastro o que na verdade era um requisito de consistência
+  do estoque. A falha foi apontada por mim ("marcas variam"), não pela IA. A correção foi o SKU único em
+  todas as camadas, com 409 para SKU repetido e a migration `V3`.
+- **A detecção de drift mostrou dois efeitos colaterais do desenho da infraestrutura feito pela IA**: a regra
+  que a stack da API acrescenta ao security group do banco aparece como divergência, e o `rds.force_ssl=1`
+  não ficou registrado como parâmetro explícito porque é o valor padrão. Nenhum dos dois afeta a segurança
+  (o TLS obrigatório foi testado), mas ambos só apareceram quando a validação foi além de "os testes passaram".
 
 ---
 
