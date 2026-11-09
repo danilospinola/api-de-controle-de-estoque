@@ -572,12 +572,52 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
 
 ### Principais prompts
 
-1. *"Irei desenvolver um projeto em Java Spring Boot utilizando MVC. Para a classe Produto os
-   atributos são: id (UUID), quantidadeTotal, quantidadeDisponivel, quantidadeReservada,
-   quantidadeBloqueada, version (Long). Classe Reserva: id, produto, pedidoId, status (ATIVA,
-   LIBERADA, EFETIVADA), dataCriacao. Classe Bloqueio: id, produto, motivo (opcional), pedidoId,
-   status (ATIVO, LIBERADO), dataCriacao. [...] Crie um README [...]. Irei utilizar o RDS para a
-   persistência dos dados."* (com o PDF do case anexado)
+1. **Prompt principal**, que deu origem ao projeto, enviado com o PDF do case anexado (transcrito na
+   íntegra):
+
+   ```text
+   Irei desenvolver um projeto em JAVA Spring boot utilizando MVC, para a classe produtos os atributos são os seguintes:
+   ● id (UUID;
+   ● quantidadeTotal (Integer)
+   ● quantidadeDisponivel (Integer )
+   ● quantidadeReservada (Integer)
+   ● quantidadeBloqueada (Integer)
+   ● version (Long)
+
+   classe Reserva:
+   id (UUID)
+   produto (Produto)
+   pedidoId (String) FK de pedido
+   status (Enum - ex: ATIVA, LIBERADA, EFETIVADA):
+   dataCriacao (LocalDateTime)
+
+   Classe Bloqueio:
+
+   id (UUID)
+   produto (Produto)
+   motivo (String) Não obrigatório
+   pedidoId (String) FK de pedido
+   status (Enum - ex: ATIVO, LIBERADO)
+   dataCriacao (LocalDateTime)
+
+   para a controller crie as seguintes operações:
+
+   crie um arquivo README contendo:
+
+   • visão geral da solução;
+   • arquitetura/estrutura adotada;
+   • principais decisões técnicas;
+   • premissas consideradas;
+   • limitações conhecidas;
+   • instruções para execução;
+   • o que você faria diferente caso essa solução precisasse operar em um ambiente real de produção.
+
+   irei utilizar o RDS para a persistência dos dados.
+   ```
+
+   A partir dele, a IA montou o modelo de domínio, as rotas, a migration, os testes e este README. As
+   operações da controller vieram das funcionalidades do PDF (entrada, saída, reservar, bloquear, liberar e
+   consultar), já que a lista no prompt ficou vazia.
 2. Escolha de engine (PostgreSQL) e do nível de detalhe das explicações.
 3. *"No modelo atual o produto não possui nome, coloque um nome dele."* A IA adicionou `nome`
    obrigatório e não único, validado em três camadas (Bean Validation, domínio e CHECK no banco).
@@ -745,16 +785,14 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
 
 ## 9. Visão de engenharia: 5 aspectos mais importantes
 
-1. **Consistência transacional e invariantes explícitas.** O valor do sistema é o saldo estar
-   certo. Invariantes no domínio, atomicidade por transação e CHECK constraints no banco formam
-   três camadas de proteção.
-2. **Controle de concorrência.** Estoque é um recurso disputado. Sem lock (otimista ou pessimista),
-   duas reservas simultâneas vendem a mesma unidade. A estratégia precisa ser escolhida, medida e
-   testada sob carga real.
-3. **Testes em múltiplos níveis, incluindo concorrência.** Testes unitários de domínio dão
-   feedback rápido; integração e concorrência provam o que de fato importa em produção.
-4. **Idempotência e rastreabilidade.** Em sistemas distribuídos, requisições se repetem. Reservas
-   identificáveis, status explícitos e um futuro ledger permitem reconciliar e auditar.
-5. **Observabilidade e evolução segura.** Métricas de conflitos e erros de negócio, migrations
-   versionadas e um contrato de API estável (DTOs, RFC 9457) permitem evoluir sem quebrar
-   consumidores nem corromper dados.
+1. **Saldo sempre correto.** É o que mais importa num estoque. Por isso a regra é conferida em três
+   lugares: no código, na transação e no banco de dados.
+2. **Pedidos ao mesmo tempo.** Duas pessoas podem tentar reservar a última unidade no mesmo instante.
+   Sem controle, as duas conseguiriam. O sistema garante que só uma vença.
+3. **Testes em vários níveis.** Testes rápidos conferem cada regra isoladamente. Testes maiores simulam
+   muitos pedidos simultâneos, que é onde os erros reais costumam aparecer.
+4. **Pedidos repetidos e histórico.** Na internet, a mesma requisição pode chegar duas vezes. Cada
+   reserva tem identificação e status, o que permite conferir e corrigir depois. Evitar a duplicação
+   automaticamente ainda é uma melhoria futura (seção 7).
+5. **Acompanhar e evoluir com segurança.** Medir erros e conflitos mostra os problemas cedo. Mudanças
+   no banco e na API feitas de forma versionada permitem evoluir sem quebrar quem já usa o sistema.
