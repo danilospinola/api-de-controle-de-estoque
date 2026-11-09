@@ -14,7 +14,6 @@ import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
 
 import java.util.List;
-import java.util.UUID;
 
 /**
  * Payloads de entrada da API. Validação sintática aqui; regras de negócio no domínio.
@@ -70,14 +69,15 @@ public final class Requests {
     public static final int MAXIMO_ITENS_PEDIDO = 100;
 
     public record ItemReservaRequest(
-            @Schema(example = "3fa85f64-5717-4562-b3fc-2c963f66afa6")
-            @NotNull(message = OBRIGATORIO) UUID produtoId,
+            @Schema(example = "TEC-LOGI-K120", description = "SKU do produto (maiúsculas e minúsculas são equivalentes)")
+            @NotBlank(message = OBRIGATORIO)
+            @Size(max = Produto.TAMANHO_MAXIMO_SKU, message = TAMANHO_MAXIMO) String sku,
             @Schema(example = "2")
             @NotNull(message = OBRIGATORIA) @Positive(message = MAIOR_QUE_ZERO) Integer quantidade) {
     }
 
     public record ReservarPedidoRequest(
-            @Schema(description = "Itens do pedido: cada produto aparece uma única vez")
+            @Schema(description = "Itens do pedido: cada SKU aparece uma única vez")
             @NotEmpty(message = "deve ter ao menos um item")
             @Size(max = MAXIMO_ITENS_PEDIDO, message = "deve ter no máximo {max} itens")
             List<@NotNull(message = "não pode ser nulo") @Valid ItemReservaRequest> itens) {

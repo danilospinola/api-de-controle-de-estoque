@@ -34,7 +34,9 @@ import java.util.regex.Pattern;
  * {@link #sku} é a chave de negócio: obrigatório e <b>único</b>, gravado em maiúsculas, então
  * "tec-01" e "TEC-01" são o mesmo produto. É ele que impede cadastrar o mesmo item duas vezes com
  * saldos separados. {@link #nome} e {@link #marca} são descritivos e não únicos (marcas diferentes
- * podem usar o mesmo nome). O {@link #id} continua sendo a identidade técnica usada nas rotas.
+ * podem usar o mesmo nome). As rotas da API identificam o produto pelo SKU; o {@link #id} (UUID)
+ * é só a chave técnica do banco, usada nas chaves estrangeiras e nunca exposta na API. Por isso o
+ * SKU é imutável: não há operação que o altere depois do cadastro.
  */
 @Entity
 @Table(name = "produto")
@@ -173,7 +175,7 @@ public class Produto {
     private void exigirDisponivel(int quantidade) {
         exigirPositiva(quantidade);
         if (quantidade > quantidadeDisponivel) {
-            throw new EstoqueInsuficienteException(id, quantidade, quantidadeDisponivel);
+            throw new EstoqueInsuficienteException(sku, quantidade, quantidadeDisponivel);
         }
     }
 

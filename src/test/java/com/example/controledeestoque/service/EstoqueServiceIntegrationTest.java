@@ -8,7 +8,6 @@ import com.example.controledeestoque.exception.EstoqueInsuficienteException;
 import com.example.controledeestoque.exception.RecursoNaoEncontradoException;
 import com.example.controledeestoque.exception.RegraNegocioException;
 import com.example.controledeestoque.exception.SkuDuplicadoException;
-import com.example.controledeestoque.repository.ReservaRepository;
 import com.example.controledeestoque.service.EstoqueService.ItemReserva;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -46,87 +45,120 @@ class EstoqueServiceIntegrationTest {
     private EstoqueService service;
 
     @Autowired
-    private ReservaRepository reservaRepository;
-
-    @Autowired
     private JdbcTemplate jdbcTemplate;
 
     @Test
     void fluxoCompletoPersisteSaldosEStatus() {
-        UUID produtoId = criarProduto(NOME,20).getId();
+        String sku = criarProduto(NOME,20).getSku();
 
-        service.entrada(produtoId, 5);                                     // 25 disponível
-        service.saida(produtoId, 3);                                       // 22 disponível
-        Reserva r1 = service.reservar(produtoId, "PED-1", 4);              // 18 disp / 4 res
-        Reserva r2 = service.reservar(produtoId, "PED-2", 6);              // 12 disp / 10 res
-        Bloqueio b1 = service.bloquear(produtoId, "PED-3", "avaria", 2);   // 10 disp / 2 bloq
+        service.entrada(sku, 5);                                     // 25 disponível
+        service.saida(sku, 3);                                       // 22 disponível
+        Reserva r1 = service.reservar(sku, "PED-1", 4);              // 18 disp / 4 res
+        Reserva r2 = service.reservar(sku, "PED-2", 6);              // 12 disp / 10 res
+        Bloqueio b1 = service.bloquear(sku, "PED-3", "avaria", 2);   // 10 disp / 2 bloq
         service.liberarReserva(r1.getId());                                // 14 disp / 6 res
         service.efetivarReserva(r2.getId());                               // total 16, 0 res
         service.liberarBloqueio(b1.getId());                               // 16 disp / 0 bloq
 
-        Produto produto = service.consultarProduto(produtoId);
+        Produto produto = service.consultarProduto(sku);
         assertThat(produto.getNome()).isEqualTo(NOME);
         assertSaldo(produto, 16, 16, 0, 0);
         assertThat(service.consultarReserva(r1.getId()).getStatus()).isEqualTo(StatusReserva.LIBERADA);
         assertThat(service.consultarReserva(r2.getId()).getStatus()).isEqualTo(StatusReserva.EFETIVADA);
-        assertThat(service.listarReservas(produtoId, null)).hasSize(2);
-        assertThat(service.listarReservas(produtoId, StatusReserva.ATIVA)).isEmpty();
+        assertThat(service.listarReservas(sku, null)).hasSize(2);
+        assertThat(service.listarReservas(sku, StatusReserva.ATIVA)).isEmpty();
     }
 
     @Test
     void operacaoInvalidaNaoPersisteNadaParcialmente() {
-        UUID produtoId = criarProduto(NOME,5).getId();
+        String sku = criarProduto(NOME,5).getSku();
 
-        assertThatThrownBy(() -> service.reservar(produtoId, "PED-1", 6))
+        assertThatThrownBy(() -> service.reservar(sku, "PED-1", 6))
                 .isInstanceOf(EstoqueInsuficienteException.class);
 
-        assertSaldo(service.consultarProduto(produtoId), 5, 5, 0, 0);
-        assertThat(service.listarReservas(produtoId, null)).isEmpty();
+        assertSaldo(service.consultarProduto(sku), 5, 5, 0, 0);
+        assertThat(service.listarReservas(sku, null)).isEmpty();
     }
 
     @Test
     void liberarReservaDuasVezesERejeitado() {
-        UUID produtoId = criarProduto(NOME,5).getId();
-        Reserva reserva = service.reservar(produtoId, "PED-1", 2);
+        String sku = criarProduto(NOME,5).getSku();
+        Reserva reserva = service.reservar(sku, "PED-1", 2);
         service.liberarReserva(reserva.getId());
 
         assertThatThrownBy(() -> service.liberarReserva(reserva.getId()))
                 .isInstanceOf(RegraNegocioException.class);
-        assertSaldo(service.consultarProduto(produtoId), 5, 5, 0, 0);
+        assertSaldo(service.consultarProduto(sku), 5, 5, 0, 0);
     }
 
     @Test
     void recursosInexistentesGeramNaoEncontrado() {
+        String skuInexistente = "it-nao-existe";
         UUID inexistente = UUID.randomUUID();
 
-        assertThatThrownBy(() -> service.consultarProduto(inexistente)).isInstanceOf(RecursoNaoEncontradoException.class);
-        assertThatThrownBy(() -> service.entrada(inexistente, 1)).isInstanceOf(RecursoNaoEncontradoException.class);
+        assertThatThrownBy(() -> service.consultarProduto(skuInexistente))
+                .isInstanceOf(RecursoNaoEncontradoException.class)
+                .hasMessage("Produto com sku IT-NAO-EXISTE não existe.");
+        assertThatThrownBy(() -> service.entrada(skuInexistente, 1)).isInstanceOf(RecursoNaoEncontradoException.class);
+        assertThatThrownBy(() -> service.reservar(skuInexistente, "PED-1", 1)).isInstanceOf(RecursoNaoEncontradoException.class);
+        assertThatThrownBy(() -> service.bloquear(skuInexistente, "PED-1", null, 1)).isInstanceOf(RecursoNaoEncontradoException.class);
+        assertThatThrownBy(() -> service.listarReservas(skuInexistente, null)).isInstanceOf(RecursoNaoEncontradoException.class);
+        assertThatThrownBy(() -> service.listarBloqueios(skuInexistente, null)).isInstanceOf(RecursoNaoEncontradoException.class);
         assertThatThrownBy(() -> service.liberarReserva(inexistente)).isInstanceOf(RecursoNaoEncontradoException.class);
         assertThatThrownBy(() -> service.liberarBloqueio(inexistente)).isInstanceOf(RecursoNaoEncontradoException.class);
-        assertThatThrownBy(() -> service.listarReservas(inexistente, null)).isInstanceOf(RecursoNaoEncontradoException.class);
+    }
+
+    @Test
+    void produtoEIdentificadoPeloSkuEmQualquerCaixa() {
+        String sku = criarProduto(NOME, 10).getSku();
+        String minusculo = sku.toLowerCase();
+
+        service.entrada(minusculo, 2);
+        Reserva reserva = service.reservar("  " + minusculo + " ", "PED-1", 3);
+        Bloqueio bloqueio = service.bloquear(minusculo, "PED-2", null, 1);
+
+        assertThat(reserva.getProduto().getSku()).isEqualTo(sku);
+        assertThat(bloqueio.getProduto().getSku()).isEqualTo(sku);
+        assertSaldo(service.consultarProduto(minusculo), 12, 8, 3, 1);
+        assertThat(service.listarReservas(minusculo, null)).hasSize(1);
+        assertThat(service.listarBloqueios(minusculo, null)).hasSize(1);
+    }
+
+    @Test
+    void consultasDeReservaEBloqueioJaTrazemOProdutoParaUsoForaDaTransacao() {
+        String sku = criarProduto(NOME, 10).getSku();
+        UUID reservaId = service.reservar(sku, "PED-LAZY", 2).getId();
+        UUID bloqueioId = service.bloquear(sku, "PED-LAZY", null, 1).getId();
+
+        // Fora de qualquer transação (open-in-view=false), como na montagem da resposta HTTP.
+        assertThat(service.consultarReserva(reservaId).getProduto().getSku()).isEqualTo(sku);
+        assertThat(service.consultarBloqueio(bloqueioId).getProduto().getSku()).isEqualTo(sku);
+        assertThat(service.listarReservas(sku, null).get(0).getProduto().getSku()).isEqualTo(sku);
+        assertThat(service.listarBloqueios(sku, null).get(0).getProduto().getSku()).isEqualTo(sku);
+        assertThat(service.listarReservasDoPedido("PED-LAZY", null).get(0).getProduto().getSku()).isEqualTo(sku);
     }
 
     @Test
     void bancoRejeitaEstadoInconsistenteMesmoFuraDaAplicacao() {
-        UUID produtoId = criarProduto(NOME,5).getId();
+        String sku = criarProduto(NOME,5).getSku();
 
         // Simula um bug/acesso direto que quebraria a invariante total = disp + res + bloq.
         assertThatThrownBy(() -> jdbcTemplate.update(
-                "UPDATE produto SET quantidade_disponivel = quantidade_disponivel + 1 WHERE id = ?", produtoId))
+                "UPDATE produto SET quantidade_disponivel = quantidade_disponivel + 1 WHERE sku = ?", sku))
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThatThrownBy(() -> jdbcTemplate.update(
-                "UPDATE produto SET quantidade_total = -1, quantidade_disponivel = -1 WHERE id = ?", produtoId))
+                "UPDATE produto SET quantidade_total = -1, quantidade_disponivel = -1 WHERE sku = ?", sku))
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThatThrownBy(() -> jdbcTemplate.update(
-                "UPDATE produto SET nome = '   ' WHERE id = ?", produtoId))
+                "UPDATE produto SET nome = '   ' WHERE sku = ?", sku))
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThatThrownBy(() -> jdbcTemplate.update(
-                "UPDATE produto SET nome = NULL WHERE id = ?", produtoId))
+                "UPDATE produto SET nome = NULL WHERE sku = ?", sku))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
         // V2: pedido_id em branco é barrado pelo banco mesmo sem passar pelo domínio.
-        Reserva reserva = service.reservar(produtoId, "PED-1", 1);
-        Bloqueio bloqueio = service.bloquear(produtoId, "PED-2", null, 1);
+        Reserva reserva = service.reservar(sku, "PED-1", 1);
+        Bloqueio bloqueio = service.bloquear(sku, "PED-2", null, 1);
         assertThatThrownBy(() -> jdbcTemplate.update(
                 "UPDATE reserva SET pedido_id = '   ' WHERE id = ?", reserva.getId()))
                 .isInstanceOf(DataIntegrityViolationException.class);
@@ -140,10 +172,10 @@ class EstoqueServiceIntegrationTest {
         int estoqueInicial = 50;
         int quantidadePorReserva = 5;
         int requisicoes = 20; // demanda de 100 unidades para 50 disponíveis
-        UUID produtoId = criarProduto(NOME,estoqueInicial).getId();
+        String sku = criarProduto(NOME,estoqueInicial).getSku();
 
         List<Resultado> resultados = executarEmParalelo(requisicoes, i ->
-                () -> service.reservar(produtoId, "PED-" + i, quantidadePorReserva));
+                () -> service.reservar(sku, "PED-" + i, quantidadePorReserva));
 
         long sucessos = resultados.stream().filter(r -> r == Resultado.SUCESSO).count();
         long insuficientes = resultados.stream().filter(r -> r == Resultado.ESTOQUE_INSUFICIENTE).count();
@@ -151,39 +183,38 @@ class EstoqueServiceIntegrationTest {
         assertThat(sucessos).isEqualTo(estoqueInicial / quantidadePorReserva);
         assertThat(insuficientes).isEqualTo(requisicoes - sucessos);
 
-        Produto produto = service.consultarProduto(produtoId);
+        Produto produto = service.consultarProduto(sku);
         assertSaldo(produto, estoqueInicial, 0, estoqueInicial, 0);
-        int somaReservasAtivas = reservaRepository
-                .findByProdutoIdAndStatusOrderByDataCriacaoAsc(produtoId, StatusReserva.ATIVA).stream()
+        int somaReservasAtivas = service.listarReservas(sku, StatusReserva.ATIVA).stream()
                 .mapToInt(Reserva::getQuantidade).sum();
         assertThat(somaReservasAtivas).isEqualTo(produto.getQuantidadeReservada());
     }
 
     @Test
     void liberacoesConcorrentesDaMesmaReservaDevolvemUnidadesUmaUnicaVez() throws Exception {
-        UUID produtoId = criarProduto(NOME,10).getId();
-        UUID reservaId = service.reservar(produtoId, "PED-1", 4).getId();
+        String sku = criarProduto(NOME,10).getSku();
+        UUID reservaId = service.reservar(sku, "PED-1", 4).getId();
 
         List<Resultado> resultados = executarEmParalelo(8, i -> () -> service.liberarReserva(reservaId));
 
         assertThat(resultados).filteredOn(r -> r == Resultado.SUCESSO).hasSize(1);
         assertThat(resultados).filteredOn(r -> r == Resultado.REGRA_NEGOCIO).hasSize(7);
-        assertSaldo(service.consultarProduto(produtoId), 10, 10, 0, 0);
+        assertSaldo(service.consultarProduto(sku), 10, 10, 0, 0);
     }
 
     @Test
     void operacoesMistasConcorrentesPreservamAInvariante() throws Exception {
-        UUID produtoId = criarProduto(NOME,30).getId();
+        String sku = criarProduto(NOME,30).getSku();
 
         List<Resultado> resultados = executarEmParalelo(30, i -> switch (i % 4) {
-            case 0 -> () -> service.entrada(produtoId, 2);
-            case 1 -> () -> service.saida(produtoId, 3);
-            case 2 -> () -> service.reservar(produtoId, "PED-" + i, 2);
-            default -> () -> service.bloquear(produtoId, "PED-" + i, null, 1);
+            case 0 -> () -> service.entrada(sku, 2);
+            case 1 -> () -> service.saida(sku, 3);
+            case 2 -> () -> service.reservar(sku, "PED-" + i, 2);
+            default -> () -> service.bloquear(sku, "PED-" + i, null, 1);
         });
 
         assertThat(resultados).doesNotContain(Resultado.OUTRO_ERRO);
-        Produto produto = service.consultarProduto(produtoId);
+        Produto produto = service.consultarProduto(sku);
         assertThat(produto.getQuantidadeDisponivel()).isNotNegative();
         assertThat(produto.getQuantidadeDisponivel() + produto.getQuantidadeReservada() + produto.getQuantidadeBloqueada())
                 .isEqualTo(produto.getQuantidadeTotal());
@@ -232,13 +263,13 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void reservaDePedidoComVariosProdutosETudoOuNada() {
-        UUID teclado = criarProduto("Teclado", 5).getId();
-        UUID mouse = criarProduto("Mouse", 1).getId();
+        String teclado = criarProduto("Teclado", 5).getSku();
+        String mouse = criarProduto("Mouse", 1).getSku();
 
         assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-1",
                 List.of(new ItemReserva(teclado, 2), new ItemReserva(mouse, 3))))
                 .isInstanceOf(EstoqueInsuficienteException.class)
-                .hasMessageContaining(mouse.toString());
+                .hasMessageContaining(mouse);
         assertSaldo(service.consultarProduto(teclado), 5, 5, 0, 0);
         assertSaldo(service.consultarProduto(mouse), 1, 1, 0, 0);
         assertThat(service.listarReservasDoPedido("PED-MULTI-1", null)).isEmpty();
@@ -254,17 +285,22 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void reservaDePedidoRejeitaItensInvalidosSemAlterarNada() {
-        UUID produto = criarProduto("Monitor", 5).getId();
+        String produto = criarProduto("Monitor", 5).getSku();
 
         assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2", List.of()))
                 .isInstanceOf(RegraNegocioException.class);
         assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2",
-                List.of(new ItemReserva(produto, 1), new ItemReserva(produto, 2))))
+                List.of(new ItemReserva(produto, 1), new ItemReserva(produto.toLowerCase(), 2))))
                 .isInstanceOf(RegraNegocioException.class)
                 .hasMessageContaining("mais de uma vez");
         assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2",
-                List.of(new ItemReserva(produto, 1), new ItemReserva(UUID.randomUUID(), 1))))
-                .isInstanceOf(RecursoNaoEncontradoException.class);
+                List.of(new ItemReserva(produto, 1), new ItemReserva(" ", 1))))
+                .isInstanceOf(RegraNegocioException.class)
+                .hasMessageContaining("sku");
+        assertThatThrownBy(() -> service.reservarPedido("PED-MULTI-2",
+                List.of(new ItemReserva(produto, 1), new ItemReserva("IT-NAO-EXISTE", 1))))
+                .isInstanceOf(RecursoNaoEncontradoException.class)
+                .hasMessageContaining("IT-NAO-EXISTE");
 
         assertSaldo(service.consultarProduto(produto), 5, 5, 0, 0);
         assertThat(service.listarReservasDoPedido("PED-MULTI-2", null)).isEmpty();
@@ -272,8 +308,8 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void reservasDePedidoConcorrentesEmOrdensInvertidasNaoVendemAMaisNemTravam() throws Exception {
-        UUID a = criarProduto("Produto A", 5).getId();
-        UUID b = criarProduto("Produto B", 5).getId();
+        String a = criarProduto("Produto A", 5).getSku();
+        String b = criarProduto("Produto B", 5).getSku();
         int pedidos = 10;
         ExecutorService pool = Executors.newFixedThreadPool(pedidos);
         CountDownLatch largada = new CountDownLatch(1);
@@ -312,17 +348,17 @@ class EstoqueServiceIntegrationTest {
     }
 
     @Test
-    void skuRepetidoEmQualquerCaixaResponde409ComOProdutoExistenteSemGravarNada() {
+    void skuRepetidoEmQualquerCaixaResponde409SemGravarNada() {
         Produto original = service.criarProduto("int-sku-dup", "Teclado", "Logitech", 5);
 
         assertThat(original.getSku()).isEqualTo("INT-SKU-DUP");
         assertThatThrownBy(() -> service.criarProduto("  INT-sku-DUP ", "Outro nome", null, 1))
                 .isInstanceOf(SkuDuplicadoException.class)
-                .hasMessageContaining(original.getId().toString())
-                .extracting(e -> ((SkuDuplicadoException) e).getProdutoExistente()).isEqualTo(original.getId());
-        assertSaldo(service.consultarProdutoPorSku("int-sku-dup"), 5, 5, 0, 0);
-        assertThatThrownBy(() -> service.consultarProdutoPorSku("INT-SKU-INEXISTENTE"))
-                .isInstanceOf(RecursoNaoEncontradoException.class);
+                .hasMessageContaining("INT-SKU-DUP")
+                .hasMessageContaining("/api/produtos/INT-SKU-DUP/entradas");
+        Produto gravado = service.consultarProduto("int-sku-dup");
+        assertThat(gravado.getNome()).isEqualTo("Teclado");
+        assertSaldo(gravado, 5, 5, 0, 0);
     }
 
     @Test
@@ -351,7 +387,7 @@ class EstoqueServiceIntegrationTest {
                 }
             }
             assertThat(vencedores).isEqualTo(1);
-            assertThat(service.consultarProdutoPorSku("INT-SKU-CONCORRENTE").getQuantidadeTotal()).isEqualTo(1);
+            assertThat(service.consultarProduto("INT-SKU-CONCORRENTE").getQuantidadeTotal()).isEqualTo(1);
         } finally {
             pool.shutdownNow();
         }
@@ -359,13 +395,13 @@ class EstoqueServiceIntegrationTest {
 
     @Test
     void bancoRejeitaSkuForaDoFormatoEMarcaEmBranco() {
-        UUID produtoId = criarProduto("Webcam", 1).getId();
+        String sku = criarProduto("Webcam", 1).getSku();
 
-        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET sku = 'minusculo' WHERE id = ?", produtoId))
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET sku = 'minusculo' WHERE sku = ?", sku))
                 .isInstanceOf(DataIntegrityViolationException.class);
-        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET sku = NULL WHERE id = ?", produtoId))
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET sku = NULL WHERE sku = ?", sku))
                 .isInstanceOf(DataIntegrityViolationException.class);
-        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET marca = '   ' WHERE id = ?", produtoId))
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE produto SET marca = '   ' WHERE sku = ?", sku))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 

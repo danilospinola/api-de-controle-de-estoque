@@ -18,8 +18,8 @@ public final class Responses {
 
     @Schema(description = "Saldo do produto: total = disponível + reservada + bloqueada")
     public record ProdutoResponse(
-            @Schema(description = "Identificador do produto, usado nas demais operações") UUID id,
-            @Schema(description = "Código único do produto (SKU), em maiúsculas", example = "TEC-LOGI-K120") String sku,
+            @Schema(description = "Código único do produto (SKU), em maiúsculas; identifica o produto nas demais operações",
+                    example = "TEC-LOGI-K120") String sku,
             @Schema(description = "Nome do produto") String nome,
             @Schema(description = "Marca (pode ser nula)") String marca,
             @Schema(description = "Unidades em estoque (disponível + reservada + bloqueada)") int quantidadeTotal,
@@ -31,7 +31,6 @@ public final class Responses {
 
         public static ProdutoResponse de(Produto produto) {
             return new ProdutoResponse(
-                    produto.getId(),
                     produto.getSku(),
                     produto.getNome(),
                     produto.getMarca(),
@@ -46,7 +45,7 @@ public final class Responses {
     @Schema(description = "Reserva de unidades de um produto para um pedido")
     public record ReservaResponse(
             @Schema(description = "Identificador da reserva, usado para consultar, liberar ou efetivar") UUID id,
-            @Schema(description = "Produto reservado") UUID produtoId,
+            @Schema(description = "SKU do produto reservado", example = "TEC-LOGI-K120") String sku,
             @Schema(description = "Pedido no sistema de origem") String pedidoId,
             @Schema(description = "Unidades reservadas") int quantidade,
             @Schema(description = "ATIVA (separada), LIBERADA (devolvida ao disponível) ou EFETIVADA (saiu do estoque)")
@@ -56,7 +55,7 @@ public final class Responses {
         public static ReservaResponse de(Reserva reserva) {
             return new ReservaResponse(
                     reserva.getId(),
-                    reserva.getProduto().getId(),
+                    reserva.getProduto().getSku(),
                     reserva.getPedidoId(),
                     reserva.getQuantidade(),
                     reserva.getStatus(),
@@ -67,7 +66,7 @@ public final class Responses {
     @Schema(description = "Bloqueio de unidades de um produto")
     public record BloqueioResponse(
             @Schema(description = "Identificador do bloqueio, usado para consultar ou liberar") UUID id,
-            @Schema(description = "Produto bloqueado") UUID produtoId,
+            @Schema(description = "SKU do produto bloqueado", example = "TEC-LOGI-K120") String sku,
             @Schema(description = "Solicitação no sistema de origem") String pedidoId,
             @Schema(description = "Motivo informado (opcional)") String motivo,
             @Schema(description = "Unidades bloqueadas") int quantidade,
@@ -77,7 +76,7 @@ public final class Responses {
         public static BloqueioResponse de(Bloqueio bloqueio) {
             return new BloqueioResponse(
                     bloqueio.getId(),
-                    bloqueio.getProduto().getId(),
+                    bloqueio.getProduto().getSku(),
                     bloqueio.getPedidoId(),
                     bloqueio.getMotivo(),
                     bloqueio.getQuantidade(),

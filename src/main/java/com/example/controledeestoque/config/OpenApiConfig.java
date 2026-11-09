@@ -1,5 +1,7 @@
 package com.example.controledeestoque.config;
 
+import com.example.controledeestoque.exception.EstoqueInsuficienteException;
+import com.example.controledeestoque.exception.SkuDuplicadoException;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.ExternalDocumentation;
 import io.swagger.v3.oas.models.OpenAPI;
@@ -51,11 +53,11 @@ public class OpenApiConfig {
     private static final String PROBLEMA = "Problema";
     private static final String TIPO_PROBLEMA = "application/problem+json";
     /** Parâmetros que identificam um recurso: se ele não existir, a operação responde 404. */
-    private static final Set<String> IDS_DE_RECURSO = Set.of("produtoId", "reservaId", "bloqueioId", "sku");
+    private static final Set<String> IDS_DE_RECURSO = Set.of("sku", "reservaId", "bloqueioId");
+    private static final String SKU_EXEMPLO = "TEC-LOGI-K120";
 
     private static final Map<String, String> DESCRICAO_PARAMETROS = Map.of(
-            "sku", "SKU do produto, por exemplo TEC-LOGI-K120 (maiúsculas e minúsculas são equivalentes)",
-            "produtoId", "Identificador do produto (o `id` devolvido no cadastro)",
+            "sku", "SKU informado no cadastro do produto (maiúsculas e minúsculas são equivalentes)",
             "reservaId", "Identificador da reserva (o `id` devolvido ao reservar)",
             "bloqueioId", "Identificador do bloqueio (o `id` devolvido ao bloquear)",
             "pedidoId", "Identificador do pedido no sistema de origem, por exemplo PED-2026-0001",
@@ -64,19 +66,22 @@ public class OpenApiConfig {
     private static final String DESCRICAO = """
             Controle de estoque com saldos **total, disponível, reservado e bloqueado** por produto, sempre com \
             `total = disponível + reservada + bloqueada`. Cada produto tem um **SKU** único (ex.: `TEC-LOGI-K120`), \
-            então o mesmo item não pode ser cadastrado duas vezes.
+            que o identifica em todas as rotas (`/api/produtos/{sku}/...`); maiúsculas e minúsculas são equivalentes. \
+            Reservas e bloqueios são identificados pelo `id` devolvido ao criá-los.
 
             ### Como testar em 1 minuto
-            1. Na seção **Produtos**, use **Cadastrar produto** com um SKU novo: clique em *Execute* e copie o `id` da resposta.
-            2. Na seção **Reservas**, use **Reservar um produto** (ou **Reservar vários produtos de um pedido**) com esse `id`.
-            3. Volte a **Produtos** e use **Consultar saldo do produto** para ver o efeito no saldo.
+            1. Na seção **Produtos**, use **Cadastrar produto** com um SKU novo (ex.: `TEC-LOGI-K120`) e clique em *Execute*.
+            2. Na seção **Reservas**, use **Reservar um produto** informando esse SKU no campo `sku` (ou **Reservar vários \
+            produtos de um pedido**, com o SKU de cada item) e copie o `id` da reserva.
+            3. Volte a **Produtos** e use **Consultar saldo do produto** com o mesmo SKU para ver o efeito no saldo.
             4. Em **Reservas**, use **Liberar reserva** ou **Efetivar reserva** com o `id` da reserva.
 
             ### Respostas
-            - **200 Sucesso**: sempre com o recurso no corpo, inclusive nos cadastros (o `id` criado vem no corpo).
+            - **200 Sucesso**: sempre com o recurso no corpo, inclusive nos cadastros (o `id` da reserva ou do bloqueio \
+            criado vem no corpo).
             - **400** requisição inválida: o corpo diz qual campo corrigir.
-            - **404** recurso não encontrado.
-            - **409** SKU já cadastrado (a resposta traz o `produtoExistente`) ou conflito de concorrência (o estoque \
+            - **404** recurso não encontrado (SKU, reserva ou bloqueio inexistente).
+            - **409** SKU já cadastrado (use a entrada de estoque desse SKU) ou conflito de concorrência (o estoque \
             mudou ao mesmo tempo; repita a requisição).
             - **422** regra de negócio: estoque insuficiente ou mudança de status não permitida.
             - **500** erro inesperado: informe o `identificador` da resposta.
@@ -141,6 +146,9 @@ public class OpenApiConfig {
                     if (parametro.getDescription() == null) {
                         parametro.setDescription(DESCRICAO_PARAMETROS.get(parametro.getName()));
                     }
+                    if ("sku".equals(parametro.getName()) && parametro.getExample() == null) {
+                        parametro.setExample(SKU_EXEMPLO);
+                    }
                 }
             }
             return operation;
@@ -179,9 +187,7 @@ public class OpenApiConfig {
                 .addProperty("detail", new StringSchema().description("O que aconteceu e, quando possível, como corrigir"))
                 .addProperty("instance", new StringSchema().description("Endereço chamado"))
                 .addProperty("erros", erros)
-                .addProperty("identificador", new StringSchema().description("Só no 500: código para localizar o erro no log"))
-                .addProperty("produtoExistente", new StringSchema().format("uuid")
-                        .description("Só no 409 de SKU já cadastrado: id do produto que já tem esse SKU"));
+                .addProperty("identificador", new StringSchema().description("Só no 500: código para localizar o erro no log"));
     }
 
     private static Map<String, Object> exemplo(int status, String titulo, String detalhe) {
@@ -189,7 +195,7 @@ public class OpenApiConfig {
         exemplo.put("title", titulo);
         exemplo.put("status", status);
         exemplo.put("detail", detalhe);
-        exemplo.put("instance", "/api/produtos/3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        exemplo.put("instance", "/api/produtos/" + SKU_EXEMPLO);
         return exemplo;
     }
 
@@ -200,7 +206,7 @@ public class OpenApiConfig {
     }
 
     private static Map<String, Object> exemplo404() {
-        return exemplo(404, "Recurso não encontrado", "Produto com id 3fa85f64-5717-4562-b3fc-2c963f66afa6 não existe.");
+        return exemplo(404, "Recurso não encontrado", "Produto com sku " + SKU_EXEMPLO + " não existe.");
     }
 
     private static Map<String, Object> exemplo409() {
@@ -209,15 +215,14 @@ public class OpenApiConfig {
 
     private static Map<String, Object> exemplo409Sku() {
         Map<String, Object> exemplo = exemplo(409, "SKU já cadastrado",
-                "O SKU TEC-LOGI-K120 já está cadastrado no produto 3fa85f64-5717-4562-b3fc-2c963f66afa6. "
-                        + "Para acrescentar unidades, use a entrada de estoque desse produto.");
+                new SkuDuplicadoException(SKU_EXEMPLO).getMessage());
         exemplo.put("instance", "/api/produtos");
-        exemplo.put("produtoExistente", "3fa85f64-5717-4562-b3fc-2c963f66afa6");
         return exemplo;
     }
 
     private static Map<String, Object> exemplo422() {
-        return exemplo(422, "Estoque insuficiente", "Quantidade disponível insuficiente: solicitada=5, disponível=4");
+        return exemplo(422, "Estoque insuficiente",
+                new EstoqueInsuficienteException(SKU_EXEMPLO, 5, 4).getMessage());
     }
 
     private static Map<String, Object> exemplo500() {

@@ -23,8 +23,8 @@ import java.util.List;
 
 /**
  * Reservas vistas a partir do pedido: um pedido com vários produtos é reservado em uma única
- * chamada, tudo ou nada. A rota por produto ({@code /api/produtos/{id}/reservas}) continua
- * disponível para reservas avulsas.
+ * chamada, tudo ou nada; cada item informa o SKU do produto. A rota por produto
+ * ({@code /api/produtos/{sku}/reservas}) continua disponível para reservas avulsas.
  */
 @Tag(name = TAG_RESERVAS)
 @RestController
@@ -36,13 +36,13 @@ public class PedidoController {
 
     @Operation(summary = "Reservar vários produtos de um pedido",
             description = "Reserva todos os itens de uma vez, tudo ou nada: se qualquer item falhar (produto inexistente "
-                    + "ou estoque insuficiente), nenhum é reservado e a mensagem diz qual produto falhou. "
-                    + "Cada produto aparece uma única vez na lista; até 100 itens.")
+                    + "ou estoque insuficiente), nenhum é reservado e a mensagem diz qual SKU falhou. "
+                    + "Cada SKU aparece uma única vez na lista; até 100 itens.")
     @PostMapping("/{pedidoId}/reservas")
     public List<ReservaResponse> reservar(@PathVariable String pedidoId,
                                           @Valid @RequestBody ReservarPedidoRequest request) {
         List<ItemReserva> itens = request.itens().stream()
-                .map(item -> new ItemReserva(item.produtoId(), item.quantidade()))
+                .map(item -> new ItemReserva(item.sku(), item.quantidade()))
                 .toList();
         return estoqueService.reservarPedido(pedidoId, itens).stream().map(ReservaResponse::de).toList();
     }

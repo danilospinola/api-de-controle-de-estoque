@@ -22,7 +22,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
-import java.util.UUID;
 
 import static com.example.controledeestoque.config.OpenApiConfig.TAG_BLOQUEIOS;
 import static com.example.controledeestoque.config.OpenApiConfig.TAG_MOVIMENTACOES;
@@ -32,9 +31,13 @@ import static com.example.controledeestoque.config.OpenApiConfig.TAG_RESERVAS;
 /**
  * Saldo de estoque do produto e as operações que o alteram.
  * <p>
+ * O produto é identificado pelo <b>SKU</b> nas rotas ({@code /api/produtos/{sku}/...}); maiúsculas e
+ * minúsculas são equivalentes. Reservas e bloqueios criados aqui são identificados pelo {@code id}
+ * devolvido no corpo.
+ * <p>
  * Todo sucesso responde 200 com o recurso no corpo, inclusive os cadastros (produto, reserva e
- * bloqueio): decisão do projeto, em vez de 201 Created. O identificador do recurso criado volta
- * no campo {@code id} do corpo. Os erros mantêm os códigos 4xx/5xx (ver {@link GlobalExceptionHandler}).
+ * bloqueio): decisão do projeto, em vez de 201 Created. Os erros mantêm os códigos 4xx/5xx (ver
+ * {@link GlobalExceptionHandler}).
  * <p>
  * No Swagger, cada operação aparece na seção do fluxo a que pertence (produtos, movimentações,
  * reservas ou bloqueios), e não agrupada por controller.
@@ -48,7 +51,7 @@ public class ProdutoController {
 
     @Operation(tags = TAG_PRODUTOS, summary = "Cadastrar produto",
             description = "Cria o produto com um SKU único e um saldo inicial disponível (opcional, padrão 0). "
-                    + "Guarde o `id` da resposta. Um SKU já cadastrado responde 409 com o `produtoExistente`: "
+                    + "O SKU identifica o produto em todas as demais operações. Um SKU já cadastrado responde 409: "
                     + "para acrescentar unidades a ele, use *Registrar entrada*.")
     @PostMapping
     public ProdutoResponse criar(@Valid @RequestBody CriarProdutoRequest request) {
@@ -58,62 +61,57 @@ public class ProdutoController {
 
     @Operation(tags = TAG_PRODUTOS, summary = "Consultar saldo do produto",
             description = "Quantidades total, disponível, reservada e bloqueada do produto.")
-    @GetMapping("/{produtoId}")
-    public ProdutoResponse consultar(@PathVariable UUID produtoId) {
-        return ProdutoResponse.de(estoqueService.consultarProduto(produtoId));
-    }
-
-    @Operation(tags = TAG_PRODUTOS, summary = "Buscar produto por SKU",
-            description = "Consulta o saldo pelo código de negócio. Maiúsculas e minúsculas são equivalentes.")
-    @GetMapping("/busca")
-    public ProdutoResponse buscarPorSku(@RequestParam String sku) {
-        return ProdutoResponse.de(estoqueService.consultarProdutoPorSku(sku));
+    @GetMapping("/{sku}")
+    public ProdutoResponse consultar(@PathVariable String sku) {
+        return ProdutoResponse.de(estoqueService.consultarProduto(sku));
     }
 
     @Operation(tags = TAG_MOVIMENTACOES, summary = "Registrar entrada",
             description = "Novas unidades chegam ao estoque: total e disponível aumentam.")
-    @PostMapping("/{produtoId}/entradas")
-    public ProdutoResponse entrada(@PathVariable UUID produtoId, @Valid @RequestBody MovimentacaoRequest request) {
-        return ProdutoResponse.de(estoqueService.entrada(produtoId, request.quantidade()));
+    @PostMapping("/{sku}/entradas")
+    public ProdutoResponse entrada(@PathVariable String sku, @Valid @RequestBody MovimentacaoRequest request) {
+        return ProdutoResponse.de(estoqueService.entrada(sku, request.quantidade()));
     }
 
     @Operation(tags = TAG_MOVIMENTACOES, summary = "Registrar saída",
             description = "Retira unidades do disponível (total e disponível diminuem). "
                     + "Só é aceita se houver quantidade disponível suficiente; reservadas e bloqueadas não saem por aqui.")
-    @PostMapping("/{produtoId}/saidas")
-    public ProdutoResponse saida(@PathVariable UUID produtoId, @Valid @RequestBody MovimentacaoRequest request) {
-        return ProdutoResponse.de(estoqueService.saida(produtoId, request.quantidade()));
+    @PostMapping("/{sku}/saidas")
+    public ProdutoResponse saida(@PathVariable String sku, @Valid @RequestBody MovimentacaoRequest request) {
+        return ProdutoResponse.de(estoqueService.saida(sku, request.quantidade()));
     }
 
     @Operation(tags = TAG_RESERVAS, summary = "Reservar um produto",
             description = "Separa unidades disponíveis do produto para um pedido: disponível diminui e reservada aumenta. "
-                    + "Para vários produtos do mesmo pedido de uma vez, use *Reservar vários produtos de um pedido*.")
-    @PostMapping("/{produtoId}/reservas")
-    public ReservaResponse reservar(@PathVariable UUID produtoId, @Valid @RequestBody CriarReservaRequest request) {
-        return ReservaResponse.de(estoqueService.reservar(produtoId, request.pedidoId(), request.quantidade()));
+                    + "Guarde o `id` da reserva para liberá-la ou efetivá-la. Para vários produtos do mesmo pedido "
+                    + "de uma vez, use *Reservar vários produtos de um pedido*.")
+    @PostMapping("/{sku}/reservas")
+    public ReservaResponse reservar(@PathVariable String sku, @Valid @RequestBody CriarReservaRequest request) {
+        return ReservaResponse.de(estoqueService.reservar(sku, request.pedidoId(), request.quantidade()));
     }
 
     @Operation(tags = TAG_RESERVAS, summary = "Listar reservas do produto",
             description = "Todas as reservas do produto, da mais antiga para a mais recente.")
-    @GetMapping("/{produtoId}/reservas")
-    public List<ReservaResponse> listarReservas(@PathVariable UUID produtoId,
+    @GetMapping("/{sku}/reservas")
+    public List<ReservaResponse> listarReservas(@PathVariable String sku,
                                                 @RequestParam(required = false) StatusReserva status) {
-        return estoqueService.listarReservas(produtoId, status).stream().map(ReservaResponse::de).toList();
+        return estoqueService.listarReservas(sku, status).stream().map(ReservaResponse::de).toList();
     }
 
     @Operation(tags = TAG_BLOQUEIOS, summary = "Bloquear unidades",
-            description = "Torna unidades disponíveis indisponíveis para uso (ex.: avaria): disponível diminui e bloqueada aumenta.")
-    @PostMapping("/{produtoId}/bloqueios")
-    public BloqueioResponse bloquear(@PathVariable UUID produtoId, @Valid @RequestBody CriarBloqueioRequest request) {
+            description = "Torna unidades disponíveis indisponíveis para uso (ex.: avaria): disponível diminui e "
+                    + "bloqueada aumenta. Guarde o `id` do bloqueio para liberá-lo.")
+    @PostMapping("/{sku}/bloqueios")
+    public BloqueioResponse bloquear(@PathVariable String sku, @Valid @RequestBody CriarBloqueioRequest request) {
         return BloqueioResponse.de(
-                estoqueService.bloquear(produtoId, request.pedidoId(), request.motivo(), request.quantidade()));
+                estoqueService.bloquear(sku, request.pedidoId(), request.motivo(), request.quantidade()));
     }
 
     @Operation(tags = TAG_BLOQUEIOS, summary = "Listar bloqueios do produto",
             description = "Todos os bloqueios do produto, do mais antigo para o mais recente.")
-    @GetMapping("/{produtoId}/bloqueios")
-    public List<BloqueioResponse> listarBloqueios(@PathVariable UUID produtoId,
+    @GetMapping("/{sku}/bloqueios")
+    public List<BloqueioResponse> listarBloqueios(@PathVariable String sku,
                                                   @RequestParam(required = false) StatusBloqueio status) {
-        return estoqueService.listarBloqueios(produtoId, status).stream().map(BloqueioResponse::de).toList();
+        return estoqueService.listarBloqueios(sku, status).stream().map(BloqueioResponse::de).toList();
     }
 }

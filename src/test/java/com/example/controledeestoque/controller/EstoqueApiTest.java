@@ -18,7 +18,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** Contrato HTTP: rotas, códigos de status e formato de erro (ProblemDetail). */
+/** Contrato HTTP: rotas (produto identificado pelo SKU), códigos de status e formato de erro (ProblemDetail). */
 @SpringBootTest
 @AutoConfigureMockMvc
 class EstoqueApiTest {
@@ -29,28 +29,34 @@ class EstoqueApiTest {
     private MockMvc mvc;
 
     @Test
-    void cadastraEConsultaProduto() throws Exception {
-        String id = criarProduto(10);
+    void cadastraEConsultaProdutoPeloSku() throws Exception {
+        String sku = criarProduto(10);
 
-        mvc.perform(get("/api/produtos/{id}", id))
+        mvc.perform(get("/api/produtos/{sku}", sku))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sku").value(sku))
+                .andExpect(jsonPath("$.id").doesNotExist())
                 .andExpect(jsonPath("$.nome").value(NOME))
-                .andExpect(jsonPath("$.sku", org.hamcrest.Matchers.startsWith("API-")))
                 .andExpect(jsonPath("$.quantidadeTotal").value(10))
                 .andExpect(jsonPath("$.quantidadeDisponivel").value(10))
                 .andExpect(jsonPath("$.quantidadeReservada").value(0))
                 .andExpect(jsonPath("$.quantidadeBloqueada").value(0));
+
+        // Maiúsculas e minúsculas são equivalentes também no endereço.
+        mvc.perform(get("/api/produtos/{sku}", sku.toLowerCase()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sku").value(sku));
     }
 
     @Test
     void entradaESaida() throws Exception {
-        String id = criarProduto(10);
+        String sku = criarProduto(10);
 
-        postJson("/api/produtos/" + id + "/entradas", "{\"quantidade\": 5}")
+        postJson("/api/produtos/" + sku + "/entradas", "{\"quantidade\": 5}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.quantidadeTotal").value(15));
 
-        postJson("/api/produtos/" + id + "/saidas", "{\"quantidade\": 7}")
+        postJson("/api/produtos/" + sku.toLowerCase() + "/saidas", "{\"quantidade\": 7}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.quantidadeTotal").value(8))
                 .andExpect(jsonPath("$.quantidadeDisponivel").value(8));
@@ -58,64 +64,75 @@ class EstoqueApiTest {
 
     @Test
     void saidaAcimaDoDisponivelRetorna422() throws Exception {
-        String id = criarProduto(3);
+        String sku = criarProduto(3);
 
-        postJson("/api/produtos/" + id + "/saidas", "{\"quantidade\": 4}")
+        postJson("/api/produtos/" + sku + "/saidas", "{\"quantidade\": 4}")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.title").value("Estoque insuficiente"))
+                .andExpect(jsonPath("$.detail", containsString(sku)))
                 .andExpect(jsonPath("$.detail", containsString("disponível=3")));
     }
 
     @Test
     void cicloDeVidaDaReservaPelaApi() throws Exception {
-        String produtoId = criarProduto(10);
+        String sku = criarProduto(10);
 
-        String reserva = postJson("/api/produtos/" + produtoId + "/reservas",
+        String reserva = postJson("/api/produtos/" + sku + "/reservas",
                 "{\"pedidoId\": \"PED-1\", \"quantidade\": 4}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").exists())
                 .andExpect(jsonPath("$.status").value("ATIVA"))
-                .andExpect(jsonPath("$.produtoId").value(produtoId))
+                .andExpect(jsonPath("$.sku").value(sku))
+                .andExpect(jsonPath("$.produtoId").doesNotExist())
                 .andReturn().getResponse().getContentAsString();
         String reservaId = JsonPath.read(reserva, "$.id");
 
         mvc.perform(get("/api/reservas/{id}", reservaId))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sku").value(sku))
                 .andExpect(jsonPath("$.pedidoId").value("PED-1"))
                 .andExpect(jsonPath("$.quantidade").value(4));
 
-        mvc.perform(get("/api/produtos/{id}/reservas", produtoId).param("status", "ATIVA"))
+        mvc.perform(get("/api/produtos/{sku}/reservas", sku).param("status", "ATIVA"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(1)));
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].sku").value(sku));
 
         mvc.perform(post("/api/reservas/{id}/efetivacao", reservaId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("EFETIVADA"));
+                .andExpect(jsonPath("$.status").value("EFETIVADA"))
+                .andExpect(jsonPath("$.sku").value(sku));
 
         mvc.perform(post("/api/reservas/{id}/liberacao", reservaId))
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.title").value("Operação inválida"));
 
-        mvc.perform(get("/api/produtos/{id}", produtoId))
+        mvc.perform(get("/api/produtos/{sku}", sku))
                 .andExpect(jsonPath("$.quantidadeTotal").value(6))
                 .andExpect(jsonPath("$.quantidadeReservada").value(0));
     }
 
     @Test
     void cicloDeVidaDoBloqueioPelaApi() throws Exception {
-        String produtoId = criarProduto(10);
+        String sku = criarProduto(10);
 
-        String bloqueio = postJson("/api/produtos/" + produtoId + "/bloqueios",
+        String bloqueio = postJson("/api/produtos/" + sku + "/bloqueios",
                 "{\"pedidoId\": \"PED-9\", \"motivo\": \"avaria\", \"quantidade\": 3}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("ATIVO"))
                 .andExpect(jsonPath("$.motivo").value("avaria"))
+                .andExpect(jsonPath("$.sku").value(sku))
                 .andReturn().getResponse().getContentAsString();
         String bloqueioId = JsonPath.read(bloqueio, "$.id");
 
-        mvc.perform(get("/api/produtos/{id}", produtoId))
+        mvc.perform(get("/api/produtos/{sku}", sku))
                 .andExpect(jsonPath("$.quantidadeDisponivel").value(7))
                 .andExpect(jsonPath("$.quantidadeBloqueada").value(3));
+
+        mvc.perform(get("/api/produtos/{sku}/bloqueios", sku).param("status", "ATIVO"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].sku").value(sku));
 
         mvc.perform(post("/api/bloqueios/{id}/liberacao", bloqueioId))
                 .andExpect(status().isOk())
@@ -123,14 +140,15 @@ class EstoqueApiTest {
 
         mvc.perform(get("/api/bloqueios/{id}", bloqueioId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("LIBERADO"));
+                .andExpect(jsonPath("$.status").value("LIBERADO"))
+                .andExpect(jsonPath("$.sku").value(sku));
     }
 
     @Test
     void payloadInvalidoRetorna400ComErrosPorCampo() throws Exception {
-        String produtoId = criarProduto(10);
+        String sku = criarProduto(10);
 
-        postJson("/api/produtos/" + produtoId + "/reservas", "{\"pedidoId\": \" \", \"quantidade\": 0}")
+        postJson("/api/produtos/" + sku + "/reservas", "{\"pedidoId\": \" \", \"quantidade\": 0}")
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.title").value("Requisição inválida"))
                 .andExpect(jsonPath("$.erros.pedidoId").value("é obrigatório"))
@@ -154,13 +172,12 @@ class EstoqueApiTest {
 
     @Test
     void entradaQueUltrapassariaOLimiteRetorna422() throws Exception {
-        String corpo = postJson("/api/produtos",
-                "{\"sku\": \"" + skuUnico() + "\", \"nome\": \"" + NOME + "\", \"quantidadeInicial\": " + Integer.MAX_VALUE + "}")
-                .andExpect(status().isOk())
-                .andReturn().getResponse().getContentAsString();
-        String id = JsonPath.read(corpo, "$.id");
+        String sku = skuUnico();
+        postJson("/api/produtos",
+                "{\"sku\": \"" + sku + "\", \"nome\": \"" + NOME + "\", \"quantidadeInicial\": " + Integer.MAX_VALUE + "}")
+                .andExpect(status().isOk());
 
-        postJson("/api/produtos/" + id + "/entradas", "{\"quantidade\": 1}")
+        postJson("/api/produtos/" + sku + "/entradas", "{\"quantidade\": 1}")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.title").value("Operação inválida"))
                 .andExpect(jsonPath("$.detail", containsString("limite")));
@@ -175,28 +192,34 @@ class EstoqueApiTest {
     }
 
     @Test
-    void swaggerOrganizadoPorFluxoComErrosDocumentados() throws Exception {
+    void swaggerOrganizadoPorFluxoComRotasPorSku() throws Exception {
         mvc.perform(get("/v3/api-docs"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tags[*].name",
                         org.hamcrest.Matchers.contains("1. Produtos", "2. Movimentações", "3. Reservas", "4. Bloqueios")))
                 .andExpect(jsonPath("$.paths['/api/produtos'].post.tags[0]").value("1. Produtos"))
-                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.tags[0]").value("2. Movimentações"))
-                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/reservas'].post.tags[0]").value("3. Reservas"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}'].get.tags[0]").value("1. Produtos"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}'].get.parameters[0].name").value("sku"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}'].get.parameters[0].example").value("TEC-LOGI-K120"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}'].get.responses['404']").exists())
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}/saidas'].post.tags[0]").value("2. Movimentações"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}/reservas'].post.tags[0]").value("3. Reservas"))
                 .andExpect(jsonPath("$.paths['/api/pedidos/{pedidoId}/reservas'].post.tags[0]").value("3. Reservas"))
                 .andExpect(jsonPath("$.paths['/api/reservas/{reservaId}/liberacao'].post.tags[0]").value("3. Reservas"))
-                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/bloqueios'].post.tags[0]").value("4. Bloqueios"))
-                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.responses['200'].description")
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}/bloqueios'].post.tags[0]").value("4. Bloqueios"))
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}/saidas'].post.responses['200'].description")
                         .value("Sucesso"))
-                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.responses['422']").exists())
-                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}/saidas'].post.responses['404']").exists())
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}/saidas'].post.responses['422']").exists())
+                .andExpect(jsonPath("$.paths['/api/produtos/{sku}/saidas'].post.responses['404']").exists())
                 .andExpect(jsonPath("$.paths['/api/pedidos/{pedidoId}/reservas'].post.responses['404']").exists())
                 .andExpect(jsonPath("$.paths['/api/produtos'].post.responses['400']").exists())
                 .andExpect(jsonPath("$.paths['/api/produtos'].post.responses['422']").doesNotExist())
                 .andExpect(jsonPath("$.paths['/api/produtos'].post.responses['409']").exists())
-                .andExpect(jsonPath("$.paths['/api/produtos/busca'].get.tags[0]").value("1. Produtos"))
-                .andExpect(jsonPath("$.paths['/api/produtos/busca'].get.responses['404']").exists())
-                .andExpect(jsonPath("$.components.schemas.Problema.properties.produtoExistente").exists());
+                // Nenhuma rota identifica o produto pelo UUID, e a busca separada por SKU deixou de existir.
+                .andExpect(jsonPath("$.paths['/api/produtos/{produtoId}']").doesNotExist())
+                .andExpect(jsonPath("$.paths['/api/produtos/busca']").doesNotExist())
+                .andExpect(jsonPath("$.components.schemas.ProdutoResponse.properties.id").doesNotExist())
+                .andExpect(jsonPath("$.components.schemas.ItemReservaRequest.properties.sku").exists());
     }
 
     @Test
@@ -207,31 +230,22 @@ class EstoqueApiTest {
     }
 
     @Test
-    void skuJaCadastradoResponde409ComOProdutoExistenteEBuscaPorSkuFunciona() throws Exception {
+    void skuJaCadastradoResponde409ApontandoAEntradaDeEstoque() throws Exception {
         String sku = skuUnico();
-        String corpo = postJson("/api/produtos",
+        postJson("/api/produtos",
                 "{\"sku\": \"" + sku.toLowerCase() + "\", \"nome\": \"Teclado\", \"marca\": \"Logitech\"}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.sku").value(sku.toUpperCase()))
-                .andExpect(jsonPath("$.marca").value("Logitech"))
-                .andReturn().getResponse().getContentAsString();
-        String id = JsonPath.read(corpo, "$.id");
+                .andExpect(jsonPath("$.marca").value("Logitech"));
 
         postJson("/api/produtos", "{\"sku\": \" " + sku.toUpperCase() + " \", \"nome\": \"Outro nome\"}")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.title").value("SKU já cadastrado"))
-                .andExpect(jsonPath("$.produtoExistente").value(id))
-                .andExpect(jsonPath("$.detail", containsString("entrada de estoque")));
+                .andExpect(jsonPath("$.detail", containsString("/api/produtos/" + sku.toUpperCase() + "/entradas")));
 
-        mvc.perform(get("/api/produtos/busca").param("sku", sku.toLowerCase()))
+        mvc.perform(get("/api/produtos/{sku}", sku))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.id").value(id));
-        mvc.perform(get("/api/produtos/busca").param("sku", "NAO-EXISTE-" + sku))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.title").value("Recurso não encontrado"));
-        mvc.perform(get("/api/produtos/busca"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.detail").value("O parâmetro 'sku' é obrigatório."));
+                .andExpect(jsonPath("$.nome").value("Teclado"));
     }
 
     @Test
@@ -248,7 +262,7 @@ class EstoqueApiTest {
     void reservaDeVariosProdutosPorPedidoETudoOuNada() throws Exception {
         String teclado = criarProduto(5);
         String mouse = criarProduto(1);
-        String itens = "{\"itens\": [{\"produtoId\": \"%s\", \"quantidade\": 2}, {\"produtoId\": \"%s\", \"quantidade\": %d}]}";
+        String itens = "{\"itens\": [{\"sku\": \"%s\", \"quantidade\": 2}, {\"sku\": \"%s\", \"quantidade\": %d}]}";
 
         postJson("/api/pedidos/PED-API-1/reservas", itens.formatted(teclado, mouse, 3))
                 .andExpect(status().isUnprocessableContent())
@@ -258,14 +272,15 @@ class EstoqueApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(0)));
 
-        postJson("/api/pedidos/PED-API-1/reservas", itens.formatted(teclado, mouse, 1))
+        postJson("/api/pedidos/PED-API-1/reservas", itens.formatted(teclado, mouse.toLowerCase(), 1))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(2)))
+                .andExpect(jsonPath("$[*].sku", org.hamcrest.Matchers.containsInAnyOrder(teclado, mouse)))
                 .andExpect(jsonPath("$[0].pedidoId").value("PED-API-1"))
                 .andExpect(jsonPath("$[0].status").value("ATIVA"));
         mvc.perform(get("/api/pedidos/{pedidoId}/reservas", "PED-API-1").param("status", "ATIVA"))
                 .andExpect(jsonPath("$", hasSize(2)));
-        mvc.perform(get("/api/produtos/{id}", teclado))
+        mvc.perform(get("/api/produtos/{sku}", teclado))
                 .andExpect(jsonPath("$.quantidadeReservada").value(2));
     }
 
@@ -276,24 +291,27 @@ class EstoqueApiTest {
                 .andExpect(jsonPath("$.erros.itens").value("deve ter ao menos um item"));
         postJson("/api/pedidos/PED-API-2/reservas", "{\"itens\": [{\"quantidade\": 0}]}")
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.erros['itens[0].produtoId']").value("é obrigatório"))
+                .andExpect(jsonPath("$.erros['itens[0].sku']").value("é obrigatório"))
                 .andExpect(jsonPath("$.erros['itens[0].quantidade']").value("deve ser maior que zero"));
+        postJson("/api/pedidos/PED-API-2/reservas", "{\"itens\": [{\"sku\": \"NAO-EXISTE-PED\", \"quantidade\": 1}]}")
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Produto com sku NAO-EXISTE-PED não existe."));
     }
 
     @Test
-    void uuidMalformadoRetorna400() throws Exception {
-        mvc.perform(get("/api/produtos/{id}", "nao-e-um-uuid"))
+    void uuidMalformadoDeReservaRetorna400() throws Exception {
+        mvc.perform(get("/api/reservas/{id}", "nao-e-um-uuid"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.title").value("Requisição inválida"))
-                .andExpect(jsonPath("$.detail", containsString("'produtoId'")))
+                .andExpect(jsonPath("$.detail", containsString("'reservaId'")))
                 .andExpect(jsonPath("$.detail", containsString("UUID")));
     }
 
     @Test
     void errosDeFormatoSaoEmPortuguesEApontamOQueCorrigir() throws Exception {
-        String produtoId = criarProduto(5);
+        String sku = criarProduto(5);
 
-        mvc.perform(get("/api/produtos/{id}/reservas", produtoId).param("status", "QUALQUER"))
+        mvc.perform(get("/api/produtos/{sku}/reservas", sku).param("status", "QUALQUER"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail", containsString("ATIVA, LIBERADA, EFETIVADA")));
 
@@ -302,7 +320,7 @@ class EstoqueApiTest {
                 .andExpect(jsonPath("$.title").value("Requisição inválida"))
                 .andExpect(jsonPath("$.detail", containsString("JSON válido")));
 
-        postJson("/api/produtos/" + produtoId + "/entradas", "{\"quantidade\": \"dez\"}")
+        postJson("/api/produtos/" + sku + "/entradas", "{\"quantidade\": \"dez\"}")
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail", containsString("'quantidade'")))
                 .andExpect(jsonPath("$.detail", containsString("número inteiro")));
@@ -321,14 +339,17 @@ class EstoqueApiTest {
 
     @Test
     void recursoInexistenteRetorna404() throws Exception {
-        mvc.perform(get("/api/produtos/{id}", UUID.randomUUID()))
+        mvc.perform(get("/api/produtos/{sku}", "nao-existe-404"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.title").value("Recurso não encontrado"))
-                .andExpect(jsonPath("$.detail", containsString("não existe")));
+                .andExpect(jsonPath("$.detail").value("Produto com sku NAO-EXISTE-404 não existe."));
+        postJson("/api/produtos/NAO-EXISTE-404/reservas", "{\"pedidoId\": \"PED-1\", \"quantidade\": 1}")
+                .andExpect(status().isNotFound());
         mvc.perform(post("/api/reservas/{id}/liberacao", UUID.randomUUID()))
                 .andExpect(status().isNotFound());
     }
 
+    /** Cadastra um produto com SKU único e devolve esse SKU, que identifica o produto nas demais rotas. */
     private String criarProduto(int quantidadeInicial) throws Exception {
         String corpo = postJson("/api/produtos",
                 "{\"sku\": \"" + skuUnico() + "\", \"nome\": \"" + NOME + "\", \"quantidadeInicial\": " + quantidadeInicial + "}")
@@ -336,12 +357,12 @@ class EstoqueApiTest {
                 .andExpect(header().doesNotExist("Location"))
                 .andExpect(jsonPath("$.nome").value(NOME))
                 .andReturn().getResponse().getContentAsString();
-        return JsonPath.read(corpo, "$.id");
+        return JsonPath.read(corpo, "$.sku");
     }
 
     /** SKU único por produto de teste: o banco é compartilhado entre os testes da classe. */
     private static String skuUnico() {
-        return "API-" + UUID.randomUUID().toString().substring(0, 13);
+        return "API-" + UUID.randomUUID().toString().substring(0, 13).toUpperCase();
     }
 
     private org.springframework.test.web.servlet.ResultActions postJson(String url, String json) throws Exception {

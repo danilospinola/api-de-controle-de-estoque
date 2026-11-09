@@ -78,11 +78,7 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(SkuDuplicadoException.class)
     public ProblemDetail skuDuplicado(SkuDuplicadoException e) {
-        ProblemDetail problema = problema(HttpStatus.CONFLICT, "SKU já cadastrado", e.getMessage());
-        if (e.getProdutoExistente() != null) {
-            problema.setProperty("produtoExistente", e.getProdutoExistente());
-        }
-        return problema;
+        return problema(HttpStatus.CONFLICT, "SKU já cadastrado", e.getMessage());
     }
 
     @ExceptionHandler(ConflitoConcorrenciaException.class)

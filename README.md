@@ -19,23 +19,25 @@ Cada produto mantém um saldo consolidado que obedece sempre à invariante:
 quantidadeTotal = quantidadeDisponivel + quantidadeReservada + quantidadeBloqueada   (todas ≥ 0)
 ```
 
+O **produto é identificado pelo SKU** em todas as rotas (ex.: `/api/produtos/TEC-LOGI-K120`; maiúsculas e
+minúsculas são equivalentes). Reservas e bloqueios são identificados pelo `id` (UUID) devolvido ao criá-los.
+
 | Funcionalidade | Endpoint | Efeito no saldo |
 |---|---|---|
 | Cadastrar produto (`sku` único + `nome` + `marca` opcional + quantidade inicial) | `POST /api/produtos` | total = disponível = quantidade inicial |
-| Buscar produto por SKU | `GET /api/produtos/busca?sku=TEC-LOGI-K120` | — |
-| **Consultar** | `GET /api/produtos/{id}` | — |
-| **Entrada** | `POST /api/produtos/{id}/entradas` | total ↑, disponível ↑ |
-| **Saída** | `POST /api/produtos/{id}/saidas` | total ↓, disponível ↓ (só se houver disponível) |
-| **Reservar** | `POST /api/produtos/{id}/reservas` | disponível ↓, reservada ↑ |
-| **Reservar pedido (vários produtos)** | `POST /api/pedidos/{pedidoId}/reservas` | em cada produto: disponível ↓, reservada ↑ (tudo ou nada) |
+| **Consultar** | `GET /api/produtos/{sku}` | — |
+| **Entrada** | `POST /api/produtos/{sku}/entradas` | total ↑, disponível ↑ |
+| **Saída** | `POST /api/produtos/{sku}/saidas` | total ↓, disponível ↓ (só se houver disponível) |
+| **Reservar** | `POST /api/produtos/{sku}/reservas` | disponível ↓, reservada ↑ |
+| **Reservar pedido (vários produtos)** | `POST /api/pedidos/{pedidoId}/reservas` (itens com `sku` e `quantidade`) | em cada produto: disponível ↓, reservada ↑ (tudo ou nada) |
 | Listar reservas do pedido | `GET /api/pedidos/{pedidoId}/reservas?status=ATIVA` | — |
 | Consultar reserva | `GET /api/reservas/{id}` | — |
-| Listar reservas | `GET /api/produtos/{id}/reservas?status=ATIVA` | — |
+| Listar reservas | `GET /api/produtos/{sku}/reservas?status=ATIVA` | — |
 | **Liberar reserva** | `POST /api/reservas/{id}/liberacao` | reservada ↓, disponível ↑ |
 | Efetivar reserva | `POST /api/reservas/{id}/efetivacao` | reservada ↓, total ↓ (consumo) |
-| **Bloquear** | `POST /api/produtos/{id}/bloqueios` | disponível ↓, bloqueada ↑ |
+| **Bloquear** | `POST /api/produtos/{sku}/bloqueios` | disponível ↓, bloqueada ↑ |
 | Consultar bloqueio | `GET /api/bloqueios/{id}` | — |
-| Listar bloqueios | `GET /api/produtos/{id}/bloqueios?status=ATIVO` | — |
+| Listar bloqueios | `GET /api/produtos/{sku}/bloqueios?status=ATIVO` | — |
 | **Liberar bloqueio** | `POST /api/bloqueios/{id}/liberacao` | bloqueada ↓, disponível ↑ |
 
 Ciclos de vida:
@@ -95,7 +97,7 @@ Fluxo de uma escrita (ex.: reservar):
 HTTP → ProdutoController (valida DTO)
      → EstoqueService.reservar
         → ExecutorTransacionalComRetry (abre transação)
-           → carrega Produto (com version)
+           → carrega Produto pelo SKU (com version)
            → Reserva.criar(produto, ...)  ← regra: quantidade ≤ disponível
            → flush: UPDATE produto ... WHERE id=? AND version=?   + INSERT reserva
         ← conflito de versão? nova transação, relê o saldo, reavalia a regra
@@ -116,9 +118,10 @@ HTTP → ProdutoController (valida DTO)
 | **Flyway + `ddl-auto=validate`** | Schema versionado, revisável e reproduzível; Hibernate só valida o mapeamento. | `ddl-auto=update`: inadequado para produção. |
 | **H2 (modo PostgreSQL) no perfil local/testes; PostgreSQL no perfil `rds`** | Executa e testa sem infraestrutura. A mesma migration roda nos dois bancos. | Testcontainers com PostgreSQL real (ver Limitações; não havia Docker no ambiente de desenvolvimento). |
 | **Erros RFC 9457 em português, com status semânticos** | 400 payload ou formato inválido (indicando o campo, o tipo ou os valores aceitos) · 404 inexistente · 405 método não permitido · 422 regra de negócio (estoque insuficiente, transição inválida) · 409 conflito de concorrência não resolvido · 500 erro inesperado (mensagem genérica com um identificador que também vai para o log, sem detalhes internos). As mensagens de validação são explícitas em português, então não dependem do idioma do servidor. O cliente diferencia "corrija o pedido" de "tente de novo". | 400 genérico para tudo; responder 200 também nos erros (descartado: clientes, monitoramento e health check passariam a tratar erro como sucesso). |
-| **Sucesso sempre 200, inclusive nos cadastros** | Decisão do projeto: toda resposta de sucesso usa o mesmo código e traz o recurso no corpo; o `id` do recurso criado vem no corpo. A mudança fica só na camada web (domínio, banco e infraestrutura não são afetados). | `201 Created` + `Location`, a convenção REST para criação. Ela distingue "criei agora" de "já existia", o que pesará quando houver idempotência e SKU (409). |
-| **SKU único como chave de negócio do produto** | Impede que o mesmo item exista em dois registros com saldos separados. O SKU é normalizado para maiúsculas, então a caixa não cria duplicatas. Um SKU repetido responde 409 com o `produtoExistente`; em cadastros simultâneos, a constraint única do banco decide quem vence e o outro recebe o mesmo 409. A busca fica em `/api/produtos/busca?sku=`, e não em `/sku/{sku}`, para não colidir com `/{produtoId}/reservas`. | Nome único (recusaria produtos diferentes com o mesmo nome); cadastro que soma unidades a um SKU existente (*upsert*), que misturaria cadastro com entrada de estoque sem o cliente perceber. |
-| **Reserva de pedido com vários produtos, tudo ou nada** | Um pedido real tem vários itens. Reservá-los um a um deixaria o pedido reservado pela metade quando um item falha. Todos os itens entram numa única transação: se um falhar, nada é reservado e a mensagem diz qual produto faltou. Os itens são processados em ordem de `produtoId` e o Hibernate ordena os UPDATEs (`order_updates`), então transações concorrentes travam as linhas sempre na mesma ordem e não entram em deadlock; o retry também cobre conflitos de lock. | Várias chamadas à rota por produto, com compensação pelo cliente (liberar o que já foi reservado), frágil e não atômica. |
+| **Sucesso sempre 200, inclusive nos cadastros** | Decisão do projeto: toda resposta de sucesso usa o mesmo código e traz o recurso no corpo (o `id` da reserva ou do bloqueio criado vem no corpo). A mudança fica só na camada web (domínio, banco e infraestrutura não são afetados). | `201 Created` + `Location`, a convenção REST para criação. Ela distingue "criei agora" de "já existia", o que pesará quando houver idempotência e SKU (409). |
+| **SKU único como chave de negócio do produto** | Impede que o mesmo item exista em dois registros com saldos separados. O SKU é normalizado para maiúsculas, então a caixa não cria duplicatas. Um SKU repetido responde 409 e a mensagem aponta a entrada de estoque desse SKU; em cadastros simultâneos, a constraint única do banco decide quem vence e o outro recebe o mesmo 409. | Nome único (recusaria produtos diferentes com o mesmo nome); cadastro que soma unidades a um SKU existente (*upsert*), que misturaria cadastro com entrada de estoque sem o cliente perceber. |
+| **SKU como identificador do produto nas rotas; UUID só no banco** | É o código que quem opera o estoque conhece: as rotas ficam legíveis (`/api/produtos/TEC-LOGI-K120/reservas`), quem integra não precisa guardar um UUID nem consultar antes de operar, e a busca separada por SKU deixou de ser necessária. O UUID continua como chave primária e nas chaves estrangeiras de reserva e bloqueio, então a troca não exigiu migration e não altera o desempenho dos *joins*. A busca pelo SKU usa o índice da constraint única. Reservas e bloqueios mantêm o UUID, porque não têm código de negócio. **Trade-offs aceitos:** (1) o SKU passa a ser um contrato público e precisa ser **imutável**: corrigir um SKU digitado errado quebraria URLs e integrações, ao passo que o UUID nunca muda (hoje não existe edição de SKU); (2) o SKU aparece em URLs, logs de acesso e histórico do navegador (não é dado sensível, mas fica exposto); (3) as respostas mostram o `sku` em vez do `produtoId`, então reservas e bloqueios precisam carregar o produto junto (`@EntityGraph` nas consultas, porque a resposta é montada fora da transação, com `open-in-view=false`); (4) as rotas de produto não validam o formato do SKU no endereço: um SKU fora do formato simplesmente não existe e responde 404. | Manter o UUID nas rotas com uma busca por SKU (era o desenho anterior: estável mesmo se o SKU mudasse, mas obrigava o cliente a descobrir o UUID antes de operar); aceitar os dois no mesmo endereço (ambíguo, porque um SKU pode ter o formato de um UUID); rota com prefixo, como `/api/produtos/sku/{sku}` (mais explícita, porém mais longa e duplicaria todas as rotas). |
+| **Reserva de pedido com vários produtos, tudo ou nada** | Um pedido real tem vários itens. Reservá-los um a um deixaria o pedido reservado pela metade quando um item falha. Todos os itens entram numa única transação: se um falhar, nada é reservado e a mensagem diz qual SKU faltou. Os itens são processados em ordem de SKU e o Hibernate ordena os UPDATEs pela chave primária (`order_updates`), então transações concorrentes travam as linhas sempre na mesma ordem e não entram em deadlock; o retry também cobre conflitos de lock. | Várias chamadas à rota por produto, com compensação pelo cliente (liberar o que já foi reservado), frágil e não atômica. |
 | **DTOs separados das entidades** | Contrato da API estável e independente do modelo de persistência; evita lazy loading na serialização (`open-in-view=false`). | Serializar entidades diretamente. |
 | **`Clock` injetável, UTC** | Datas determinísticas nos testes e independentes do fuso do servidor. | `LocalDateTime.now()` direto. |
 | **Infraestrutura como código (CloudFormation), implantada pelo MCP da AWS** | O template em `infra/` é versionado e revisável: quem avalia lê e reproduz a infraestrutura, as decisões ficam registradas no próprio template e a remoção é um `delete-stack`. O deploy passa por *change set*, com a validação pré-deploy do CloudFormation antes de qualquer recurso ser criado. | Criar os recursos com comandos avulsos (console/CLI): mais rápido da primeira vez, mas não reproduzível nem auditável. CDK: abstrações úteis em projetos maiores, excesso para duas stacks pequenas. |
@@ -144,9 +147,10 @@ HTTP → ProdutoController (valida DTO)
 7. **O produto é identificado pelo negócio por um SKU único.** O `sku` é obrigatório, tem até 50
    caracteres e aceita letras sem acento, números e hífens entre eles (ex.: `TEC-LOGI-K120`). Ele é gravado
    em maiúsculas, então `tec-logi-k120` e `TEC-LOGI-K120` são o mesmo produto. Cadastrar um SKU que já existe
-   responde **409** com o `produtoExistente`; novas unidades entram pela entrada de estoque. O `nome`
+   responde **409**; novas unidades entram pela entrada de estoque desse SKU. O `nome`
    (obrigatório, até 150 caracteres) e a `marca` (opcional, até 100) são descritivos e não únicos, porque
-   marcas diferentes podem usar o mesmo nome. O UUID continua sendo a identidade técnica usada nas rotas.
+   marcas diferentes podem usar o mesmo nome. **O SKU identifica o produto em todas as rotas e é imutável**;
+   o UUID do produto é só a chave técnica do banco e não aparece na API.
    As três regras são validadas na API, no domínio e no banco (constraint única e CHECKs da migration `V3`).
    Os produtos que já existiam no RDS receberam um SKU provisório, `LEGADO-<id>`.
 8. Quantidades são inteiras e positivas, até 2.147.483.647 unidades por produto (limite de `Integer`). Uma
@@ -156,8 +160,8 @@ HTTP → ProdutoController (valida DTO)
    disponibilidade (ver limitações).
 10. **Datas em UTC.** `dataCriacao` é um `LocalDateTime` (como no modelo pedido) gerado sempre em UTC por um
     `Clock` injetado; o contrato OpenAPI informa isso.
-11. **Na reserva de pedido, cada produto aparece uma única vez**, com a quantidade total; um produto repetido
-    na lista é rejeitado. O pedido tem de 1 a 100 itens. A rota por produto continua disponível para
+11. **Na reserva de pedido, cada SKU aparece uma única vez**, com a quantidade total; um SKU repetido
+    na lista (mesmo em outra caixa, como `tec-01` e `TEC-01`) é rejeitado. O pedido tem de 1 a 100 itens. A rota por produto continua disponível para
     reservas avulsas.
 
 ---
@@ -173,7 +177,12 @@ HTTP → ProdutoController (valida DTO)
   isolamento e locking diferem em detalhes.
 - **Lock otimista sob altíssima disputa** num único produto pode esgotar as tentativas (resulta em 409).
 - **Sem autenticação/autorização** e sem paginação nas listagens.
-- Sem edição de SKU, nome ou marca e sem exclusão de produto.
+- Sem edição de SKU, nome ou marca e sem exclusão de produto. A falta de edição do SKU é intencional: ele é o
+  identificador nas rotas, e trocá-lo quebraria URLs e integrações. Um SKU cadastrado errado hoje não tem
+  correção pela API (ver item 16 da seção 7).
+- **O health check da EC2 chama `GET /api/produtos/00000000-0000-0000-0000-000000000000` e espera 404.** Com
+  o SKU nas rotas, esse endereço passou a ser lido como um SKU inexistente e continua respondendo 404, então
+  o health check segue válido sem alterar a stack; o nome do endereço só ficou menos intuitivo.
 - **Sem log nem auditoria das operações.** O cadastro e as movimentações não geram linha de log, e o produto
   não tem data de criação. O access log do Tomcat e os logs de acesso do CloudFront estão desligados. Na AWS,
   o log da aplicação fica só no journal da EC2 (sem CloudWatch) e os logs do PostgreSQL não são exportados.
@@ -271,14 +280,14 @@ No Windows (PowerShell): `.\mvnw.cmd spring-boot:run`. A API sobe em `http://loc
 ./mvnw test
 ```
 
-84 testes em quatro níveis:
+85 testes em quatro níveis:
 
 | Classe | Tipo | O que garante |
 |---|---|---|
 | `ProdutoTest`, `ReservaBloqueioTest` | Unitário (domínio puro) | Regras de saldo, invariante, transições de status, rejeição sem efeito colateral, formato e normalização do SKU |
 | `ExecutorTransacionalComRetryTest` | Unitário | Repete em conflito de versão, desiste após N tentativas, não repete erro de negócio |
-| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez; reserva de pedido com vários produtos tudo ou nada, inclusive pedidos concorrentes com os produtos em ordens invertidas, sem deadlock; SKU único mesmo com 8 cadastros simultâneos do mesmo SKU (só um vence, os outros recebem 409) |
-| `EstoqueApiTest` | API (MockMvc) | Rotas, status HTTP (200/400/404/405/422), erros em português (`ProblemDetail`) indicando o que corrigir, contrato OpenAPI com servidor relativo |
+| `EstoqueServiceIntegrationTest` | Integração (JPA + Flyway + banco) | Atomicidade, CHECK constraints, **concorrência real**: 20 reservas simultâneas sobre 50 unidades → exatamente 10 sucessos, zero overselling; liberação concorrente da mesma reserva devolve as unidades uma única vez; reserva de pedido com vários produtos tudo ou nada, inclusive pedidos concorrentes com os produtos em ordens invertidas, sem deadlock; SKU único mesmo com 8 cadastros simultâneos do mesmo SKU (só um vence, os outros recebem 409); todas as operações pelo SKU em qualquer caixa; consultas de reserva e bloqueio já trazem o produto para uso fora da transação |
+| `EstoqueApiTest` | API (MockMvc) | Rotas por SKU (inclusive em minúsculas), status HTTP (200/400/404/405/409/422), erros em português (`ProblemDetail`) indicando o que corrigir, contrato OpenAPI com servidor relativo e sem rotas por UUID de produto |
 | `GlobalExceptionHandlerTest` | Unitário | Erro inesperado: 500 em português, com identificador e sem detalhes internos |
 
 ### Exemplo rápido
@@ -286,12 +295,12 @@ No Windows (PowerShell): `.\mvnw.cmd spring-boot:run`. A API sobe em `http://loc
 ```bash
 # cadastrar
 curl -X POST localhost:8080/api/produtos -H "Content-Type: application/json" -d '{"sku": "TEC-LOGI-K120", "nome": "Teclado mecanico", "marca": "Logitech", "quantidadeInicial": 10}'
-# buscar pelo SKU
-curl "localhost:8080/api/produtos/busca?sku=tec-logi-k120"
-# reservar
-curl -X POST localhost:8080/api/produtos/{id}/reservas -H "Content-Type: application/json" -d '{"pedidoId":"PED-1","quantidade":4}'
-# consultar
-curl localhost:8080/api/produtos/{id}
+# consultar pelo SKU (maiúsculas e minúsculas são equivalentes)
+curl localhost:8080/api/produtos/tec-logi-k120
+# reservar (a resposta traz o id da reserva)
+curl -X POST localhost:8080/api/produtos/TEC-LOGI-K120/reservas -H "Content-Type: application/json" -d '{"pedidoId":"PED-1","quantidade":4}'
+# reservar vários produtos de um pedido, tudo ou nada
+curl -X POST localhost:8080/api/pedidos/PED-2/reservas -H "Content-Type: application/json" -d '{"itens":[{"sku":"TEC-LOGI-K120","quantidade":2}]}'
 # liberar reserva
 curl -X POST localhost:8080/api/reservas/{reservaId}/liberacao
 ```
@@ -425,7 +434,7 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
 
 ## 7. O que eu faria diferente em produção
 
-1. **Idempotência**: header `Idempotency-Key` (ou unicidade `pedidoId + produtoId` na reserva)
+1. **Idempotência**: header `Idempotency-Key` (ou unicidade `pedidoId + produto` na reserva)
    para que retries de rede não dupliquem reservas.
 2. **Expiração de reservas** (TTL + job agendado ou fila com atraso) para devolver estoque retido.
 3. **Ledger de movimentações** (tabela append-only de entradas, saídas, reservas e liberações) para
@@ -488,7 +497,7 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
     - **Produto muito disputado**: o limite real não é a infraestrutura, é a linha do produto. Com muita
       concorrência no mesmo produto, o lock otimista gera novas tentativas em excesso. As saídas são lock
       pessimista nesses produtos, serializar os comandos por produto numa fila (SQS FIFO com
-      `MessageGroupId = produtoId`) ou dividir o saldo por armazém ou lote.
+      `MessageGroupId = sku`) ou dividir o saldo por armazém ou lote.
     - **Validação**: testes de carga (k6 ou Gatling) com o cenário de disputa, antes de definir limites de
       auto scaling e classe do banco.
 14. **Frontend para os usuários do estoque.** A API já expõe um contrato OpenAPI, então qualquer frontend
@@ -506,11 +515,13 @@ aws cloudformation wait stack-delete-complete --stack-name controle-estoque-app 
     - log estruturado (JSON, com ID de correlação) em cada operação: cadastro, entradas, saídas, reservas,
       bloqueios e liberações;
     - `data_criacao` em `produto` (migration `V3`) e uma tabela de movimentações com quem, quando, o quê e
-      quanto, consultável em `GET /api/produtos/{id}/movimentacoes` (concretiza o ledger do item 3);
+      quanto, consultável em `GET /api/produtos/{sku}/movimentacoes` (concretiza o ledger do item 3);
     - logs centralizados: CloudWatch Agent ou agente do Datadog na EC2 enviando para um log group com
       retenção definida, logs de acesso do CloudFront no S3 e exportação dos logs do RDS;
     - access log do Tomcat (`server.tomcat.accesslog.enabled=true`) para registrar toda requisição.
-16. **Catálogo de produtos** (o SKU único já foi implementado): edição de SKU, nome e marca com histórico;
+16. **Catálogo de produtos** (o SKU único já foi implementado): edição de nome e marca com histórico; troca
+    de SKU como operação administrativa controlada, porque o SKU é o identificador nas rotas (o código antigo
+    ficaria como *alias* que redireciona para o novo, para não quebrar integrações);
     atributos de variação (cor, tamanho, layout); código de barras (EAN/GTIN) como identificador
     alternativo; e substituição dos SKUs provisórios `LEGADO-<id>` pelos códigos reais.
 17. **Qualidade da API** (pontos da revisão ainda não implementados): `GET /api/produtos` paginado com
@@ -587,6 +598,11 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
     com SKU provisório para os produtos existentes, API, Swagger e testes, inclusive de cadastros
     simultâneos), implantou na AWS e validou com drift detection, que encontrou dois desvios esperados,
     investigados e documentados.
+15. *"Altere ao invés de usar o produto Id utilizar o sku"*, *"nas rotas do Swagger"* e *"anote o trade-off
+    no arquivo .md"*. A IA explicou o trade-off antes de alterar (o SKU vira contrato público e precisa ser
+    imutável), trocou o identificador do produto em todas as rotas, na reserva de pedido e nas respostas,
+    removeu a busca separada por SKU e manteve o UUID só no banco, sem migration. Implantou na AWS e validou
+    o fluxo completo pelo link público.
 
 ### Onde a IA mais ajudou
 - Gerar a estrutura completa (domínio, serviço, controllers, migration, testes) de forma consistente
@@ -606,6 +622,10 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
   recomendou ao desaconselhar 200 também para erros.
 - **cfn-lint → não utilizado.** Preferi não instalar uma ferramenta extra só para o lint; a validação ficou
   no `ValidateTemplate` e na validação pré-deploy do CloudFormation (limitação documentada).
+- **UUID nas rotas + busca por SKU → SKU nas rotas.** Ao implementar o SKU, a IA manteve o UUID como
+  identificador das rotas e criou uma busca separada (`/api/produtos/busca?sku=`), priorizando a
+  estabilidade do UUID. Preferi identificar o produto pelo SKU em todas as rotas, por ser o código que o
+  negócio usa. O custo da escolha (SKU imutável, exposto em URLs) está na seção 3.
 
 ### Ajustes feitos pela IA e pontos de atenção
 - O modelo original de `Reserva`/`Bloqueio` **não tinha `quantidade`**; a IA apontou a lacuna e o
@@ -623,6 +643,9 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
 - Antes do deploy, a IA antecipou que o Swagger atrás do CloudFront geraria links para o endereço interno
   da EC2 (bloqueado pelo security group). A correção foi um contrato OpenAPI com servidor relativo e o
   repasse do `Host` e de `X-Forwarded-Proto: https` pelo CloudFront, verificados no teste de ponta a ponta.
+- Na troca do UUID pelo SKU, a IA antecipou que mostrar o `sku` nas respostas de reserva e bloqueio daria
+  erro 500: o produto é carregado sob demanda (*lazy*) e a resposta é montada fora da transação. A correção
+  foi carregar o produto junto nas consultas (`@EntityGraph`), com um teste que lê o SKU fora da transação.
 
 ### Erros / limitações observados
 - O modelo de i.a incialmente não havia coberto erros de modelagem para atributos na entidade produtos para futuros testes feitos por humanos, o campo "Nome" foi um deles
@@ -658,6 +681,10 @@ Ferramenta utilizada: **Claude Code** (Claude), integrado ao projeto.
   que a stack da API acrescenta ao security group do banco aparece como divergência, e o `rds.force_ssl=1`
   não ficou registrado como parâmetro explícito porque é o valor padrão. Nenhum dos dois afeta a segurança
   (o TLS obrigatório foi testado), mas ambos só apareceram quando a validação foi além de "os testes passaram".
+- Num teste novo, a IA usou `List.getFirst()`, que só existe a partir do Java 21, num projeto com alvo Java 17.
+  A máquina de desenvolvimento roda Java 21, mas o compilador respeita o alvo e recusou o código. O erro foi
+  pego na primeira compilação e trocado por `get(0)`: um lembrete de que o alvo do projeto, e não a JDK
+  instalada, define a API disponível.
 
 ---
 
